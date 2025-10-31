@@ -1,0 +1,113 @@
+╔═══════════════════════════════════════════════════════════════╗
+║     TOPLU ÖĞRETMEN EKLEME - HIZLI BAŞLANGIÇ                  ║
+╚═══════════════════════════════════════════════════════════════╝
+
+🎯 AMAÇ: 30+ öğretmeni tek seferde sisteme eklemek
+
+📋 ADIMLAR:
+
+1️⃣  SUPABASE BİLGİLERİNİ ALIN
+   ─────────────────────────────────────────────────────────────
+   a) Supabase Dashboard'a gidin (https://supabase.com)
+   b) Settings > API bölümüne gidin
+   c) Şu bilgileri kopyalayın:
+      • Project URL (örn: https://xxxxx.supabase.co)
+      • service_role key (gizli anahtar)
+
+2️⃣  KURUM ID'SİNİ ALIN
+   ─────────────────────────────────────────────────────────────
+   a) Ana admin olarak giriş yapın
+   b) Kurum Yönetimi > Kurum Listesi'ne gidin
+   c) İlgili kurumun ID'sini kopyalayın
+      VEYA
+   d) Supabase Dashboard'da "institutions" tablosunu açın
+   e) Kurum adına göre ID'yi bulun
+
+3️⃣  CSV DOSYASINI HAZIRLAYIN
+   ─────────────────────────────────────────────────────────────
+   a) Excel'de yeni bir dosya açın
+   b) İlk satıra başlıkları yazın:
+      firstName,lastName,email,branch,phone
+   
+   c) Altına öğretmen bilgilerini ekleyin:
+      Ahmet,Yılmaz,ahmet.yilmaz@okul.com,Matematik,5551234567
+      Ayşe,Demir,ayse.demir@okul.com,Türkçe,5551234568
+      Mehmet,Kaya,mehmet.kaya@okul.com,Fen Bilgisi,5551234569
+      ... (30 satır daha)
+   
+   d) "Farklı Kaydet" > "CSV (Comma delimited)" seçin
+   e) Dosya adı: ogretmen_listesi.csv
+   f) Verimly klasörüne kaydedin
+
+4️⃣  SCRIPT'İ YAPILANDIRIN
+   ─────────────────────────────────────────────────────────────
+   a) bulk_add_teachers_from_csv.js dosyasını açın
+   b) Şu satırları bulun ve değiştirin:
+
+      const SUPABASE_URL = 'https://your-project.supabase.co';
+      ↓↓↓ Buraya 1. adımda aldığınız Project URL'i yazın
+
+      const SUPABASE_SERVICE_KEY = 'your-service-role-key';
+      ↓↓↓ Buraya 1. adımda aldığınız service_role key'i yazın
+
+      const INSTITUTION_ID = 'your-institution-id';
+      ↓↓↓ Buraya 2. adımda aldığınız Kurum ID'sini yazın
+
+   c) Dosyayı kaydedin (Ctrl+S)
+
+5️⃣  SCRIPT'İ ÇALIŞTIRIN
+   ─────────────────────────────────────────────────────────────
+   a) Terminal/PowerShell açın
+   b) Verimly klasörüne gidin:
+      cd D:\Verimly\Verimly
+   
+   c) Script'i çalıştırın:
+      node bulk_add_teachers_from_csv.js
+   
+   d) İşlem tamamlanana kadar bekleyin (30 öğretmen için ~15 saniye)
+
+6️⃣  SONUÇLARI KONTROL EDİN
+   ─────────────────────────────────────────────────────────────
+   a) Terminal çıktısını kontrol edin:
+      ✅ Başarılı: 30
+      ❌ Hatalı: 0
+   
+   b) Kurum yönetim panelinden öğretmenleri görün
+   c) Her öğretmenin şifresi: teacher123
+
+╔═══════════════════════════════════════════════════════════════╗
+║  ⚠️  ÖNEMLİ NOTLAR                                            ║
+╚═══════════════════════════════════════════════════════════════╝
+
+✓ Her öğretmen için FARKLI bir e-posta adresi kullanın
+✓ E-posta adresleri daha önce sisteme eklenmemiş olmalı
+✓ Tüm öğretmenlerin şifresi "teacher123" olacak
+✓ Öğretmenler ilk girişte şifrelerini değiştirebilir
+✓ İşlem sırasında internet bağlantınız açık olmalı
+
+╔═══════════════════════════════════════════════════════════════╗
+║  📞 SORUN GİDERME                                             ║
+╚═══════════════════════════════════════════════════════════════╝
+
+❌ "CSV dosyası okunamadı" hatası:
+   → ogretmen_listesi.csv dosyasının Verimly klasöründe olduğundan
+     emin olun
+
+❌ "Auth hatası: User already registered":
+   → Bu e-posta adresi zaten kullanılıyor
+   → CSV'de farklı bir e-posta adresi kullanın
+
+❌ "Cannot find module '@supabase/supabase-js'":
+   → Terminal'de şu komutu çalıştırın:
+     npm install @supabase/supabase-js csv-parser
+
+╔═══════════════════════════════════════════════════════════════╗
+║  📚 DETAYLI BİLGİ                                             ║
+╚═══════════════════════════════════════════════════════════════╝
+
+Daha fazla bilgi için TOPLU_OGRETMEN_EKLEME.md dosyasını okuyun.
+
+╔═══════════════════════════════════════════════════════════════╗
+║  ✅ BAŞARILAR!                                                ║
+╚═══════════════════════════════════════════════════════════════╝
+

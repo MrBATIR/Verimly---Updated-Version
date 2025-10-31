@@ -1,0 +1,51 @@
+{
+  "expo": {
+    "name": "Verimly",
+    "slug": "verimly-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "description": "Verimly - Öğrenci ve öğretmenler için akıllı çalışma takip uygulaması. Çalışma sürelerini takip edin, hedefler belirleyin ve başarınızı artırın.",
+    "keywords": ["eğitim", "öğrenci", "öğretmen", "çalışma", "takip", "verimlilik", "hedef", "başarı"],
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.verimly.app",
+      "buildNumber": "1",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSCameraUsageDescription": "Profil fotoğrafı için kamera erişimi",
+        "NSPhotoLibraryUsageDescription": "Profil fotoğrafı için fotoğraf galerisi erişimi"
+      },
+      "appStoreUrl": "https://apps.apple.com/app/verimly/id123456789"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true,
+      "package": "com.verimly.app",
+      "versionCode": 1,
+      "playStoreUrl": "https://play.google.com/store/apps/details?id=com.verimly.app"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "owner": "mrbatir",
+    "scheme": "verimly",
+    "extra": {
+      "eas": {
+        "projectId": "e7667173-f12f-45a6-97b7-bbfcf000f616"
+      }
+    },
+    "privacy": "public",
+    "category": "education"
+  }
+}
