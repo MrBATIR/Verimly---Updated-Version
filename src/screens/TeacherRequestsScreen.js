@@ -9,6 +9,7 @@ import Container from '../components/Container';
 import Card from '../components/Card';
 import Button from '../components/Button';
 import { supabase } from '../lib/supabase';
+import * as teacherApi from '../lib/teacherApi';
 
 const TeacherRequestsScreen = () => {
   const { isDark } = useTheme();
@@ -45,8 +46,7 @@ const TeacherRequestsScreen = () => {
       if (showLoading) {
         setLoading(true);
       }
-      const { getPendingRequests } = await import('../lib/teacherApi');
-      const result = await getPendingRequests();
+      const result = await teacherApi.getPendingRequests();
       
       if (result.success) {
         setPendingRequests(result.data || []);
@@ -109,8 +109,7 @@ const TeacherRequestsScreen = () => {
           onPress: async () => {
             try {
               if (requestType === 'connect') {
-                const { approveStudentRequest } = await import('../lib/teacherApi');
-                const result = await approveStudentRequest(requestId);
+                const result = await teacherApi.approveStudentRequest(requestId);
                 
                 if (result.success) {
                   Alert.alert('Başarılı', result.message);
@@ -120,8 +119,7 @@ const TeacherRequestsScreen = () => {
                 }
               } else {
                 // Kesme isteği için approveDisconnectionRequest kullan
-                const { approveDisconnectionRequest } = await import('../lib/teacherApi');
-                const result = await approveDisconnectionRequest(requestId);
+                const result = await teacherApi.approveDisconnectionRequest(requestId);
                 
                 if (result.success) {
                   Alert.alert('Başarılı', result.message);
@@ -151,8 +149,7 @@ const TeacherRequestsScreen = () => {
           style: 'destructive',
           onPress: async () => {
             try {
-              const { rejectStudentRequest } = await import('../lib/teacherApi');
-              const result = await rejectStudentRequest(requestId);
+              const result = await teacherApi.rejectStudentRequest(requestId);
               
               if (result.success) {
                 Alert.alert('Başarılı', result.message);

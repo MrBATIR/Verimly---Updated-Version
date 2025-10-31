@@ -8,6 +8,7 @@ import { COLORS, DARK_COLORS, SIZES, SHADOWS } from '../constants/theme';
 import { supabase } from '../lib/supabase';
 import { useTheme } from '../contexts/ThemeContext';
 import { getUnreadMessageCount } from '../lib/messageApi';
+import * as teacherApi from '../lib/teacherApi';
 
 export default function ProfileScreen({ route, navigation }) {
   const [user, setUser] = useState(null);
@@ -905,8 +906,7 @@ export default function ProfileScreen({ route, navigation }) {
     
     try {
       setLoadingTeachers(true);
-      const { getStudentTeachers } = await import('../lib/teacherApi');
-      const result = await getStudentTeachers();
+      const result = await teacherApi.getStudentTeachers();
       
       if (result.success) {
         // Bağlı öğretmenleri göster (onaylanmış ve aktif olanlar + reddedilen kesme istekleri)
@@ -937,8 +937,7 @@ export default function ProfileScreen({ route, navigation }) {
     
     try {
       setLoadingStudents(true);
-      const { getStudents } = await import('../lib/teacherApi');
-      const result = await getStudents();
+      const result = await teacherApi.getStudents();
       
       if (result.success) {
         setConnectedStudents(result.data || []);
@@ -978,10 +977,8 @@ export default function ProfileScreen({ route, navigation }) {
     }
 
     try {
-      const { getTeacherByCode, connectToTeacher } = await import('../lib/teacherApi');
-      
       // Öğretmen kodunu doğrula
-      const teacherResult = await getTeacherByCode(teacherCode.trim());
+      const teacherResult = await teacherApi.getTeacherByCode(teacherCode.trim());
       
       if (!teacherResult.success) {
         Alert.alert('Hata', teacherResult.error);
@@ -989,7 +986,7 @@ export default function ProfileScreen({ route, navigation }) {
       }
 
       // Öğretmene bağlan
-      const connectResult = await connectToTeacher(teacherResult.data.id);
+      const connectResult = await teacherApi.connectToTeacher(teacherResult.data.id);
       
       if (connectResult.success) {
         const teacher = teacherResult.data;
@@ -1023,8 +1020,7 @@ export default function ProfileScreen({ route, navigation }) {
           style: 'destructive',
           onPress: async () => {
             try {
-              const { requestDisconnection } = await import('../lib/teacherApi');
-              const result = await requestDisconnection(connectionId);
+              const result = await teacherApi.requestDisconnection(connectionId);
               
               if (result.success) {
                 Alert.alert(
@@ -1055,8 +1051,7 @@ export default function ProfileScreen({ route, navigation }) {
           style: 'destructive',
           onPress: async () => {
             try {
-              const { cancelPendingRequest } = await import('../lib/teacherApi');
-              const result = await cancelPendingRequest(connectionId);
+              const result = await teacherApi.cancelPendingRequest(connectionId);
               
               if (result.success) {
                 Alert.alert('Başarılı', result.message);

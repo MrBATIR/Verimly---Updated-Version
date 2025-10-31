@@ -8,6 +8,8 @@ import { COLORS, DARK_COLORS, SIZES } from '../constants/theme';
 import { useTheme } from '../contexts/ThemeContext';
 import { supabase } from '../lib/supabase';
 import { InterstitialAd } from '../components';
+import * as teacherApi from '../lib/teacherApi';
+import * as messageApi from '../lib/messageApi';
 
 // Screens
 import DashboardScreen from '../screens/DashboardScreen';
@@ -179,8 +181,7 @@ function BottomTabNavigatorContent({ isDemo }) {
 
   const loadPendingRequestsCount = async () => {
     try {
-      const { getPendingRequests } = await import('../lib/teacherApi');
-      const result = await getPendingRequests();
+      const result = await teacherApi.getPendingRequests();
       if (result.success) {
         setPendingRequestsCount(result.data?.length || 0);
       }
@@ -191,8 +192,7 @@ function BottomTabNavigatorContent({ isDemo }) {
 
   const loadUnreadMessageCount = async () => {
     try {
-      const { getUnreadMessageCount } = await import('../lib/messageApi');
-      const result = await getUnreadMessageCount();
+      const result = await messageApi.getUnreadMessageCount();
       if (result.success) {
         setUnreadMessageCount(result.count);
       }

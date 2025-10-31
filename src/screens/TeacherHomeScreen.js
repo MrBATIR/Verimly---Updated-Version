@@ -11,6 +11,7 @@ import Button from '../components/Button';
 import Input from '../components/Input';
 import { StudyDetailModal } from '../components';
 import { supabase } from '../lib/supabase';
+import * as teacherApi from '../lib/teacherApi';
 
 // ActivityCard Component
 const ActivityCard = ({ activity, onPress }) => {
@@ -141,8 +142,7 @@ const TeacherHomeScreen = ({ navigation }) => {
   const loadPendingRequests = async () => {
     try {
       setRequestsLoading(true);
-      const { getPendingRequests } = await import('../lib/teacherApi');
-      const result = await getPendingRequests();
+      const result = await teacherApi.getPendingRequests();
       
       if (result.success) {
         setPendingRequests(result.data || []);
@@ -161,8 +161,7 @@ const TeacherHomeScreen = ({ navigation }) => {
   const loadStudents = async () => {
     try {
       setPlansLoading(true);
-      const { getStudents } = await import('../lib/teacherApi');
-      const result = await getStudents();
+      const result = await teacherApi.getStudents();
       
       if (result.success) {
         setStudents(result.data || []);
@@ -275,8 +274,7 @@ const TeacherHomeScreen = ({ navigation }) => {
     }
 
     try {
-      const { createStudentPlan } = await import('../lib/teacherApi');
-      const result = await createStudentPlan(
+      const result = await teacherApi.createStudentPlan(
         selectedStudent.id,
         planTitle,
         planDescription,
@@ -420,8 +418,7 @@ const TeacherHomeScreen = ({ navigation }) => {
           text: 'Onayla',
           onPress: async () => {
             try {
-              const { approveStudentRequest } = await import('../lib/teacherApi');
-              const result = await approveStudentRequest(requestId);
+              const result = await teacherApi.approveStudentRequest(requestId);
               
               if (result.success) {
                 Alert.alert('Başarılı', result.message);
@@ -451,8 +448,7 @@ const TeacherHomeScreen = ({ navigation }) => {
           style: 'destructive',
           onPress: async () => {
             try {
-              const { rejectStudentRequest } = await import('../lib/teacherApi');
-              const result = await rejectStudentRequest(requestId);
+              const result = await teacherApi.rejectStudentRequest(requestId);
               
               if (result.success) {
                 Alert.alert('Başarılı', result.message);
