@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Pressable, Animated, Modal, Alert, Image } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Pressable, Animated, Modal, Alert, Image, TextInput } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import { useTheme } from '../contexts/ThemeContext';
@@ -10,7 +10,7 @@ import Card from '../components/Card';
 import Button from '../components/Button';
 import Input from '../components/Input';
 import { StudyDetailModal } from '../components';
-import { supabase } from '../lib/supabase';
+import { supabase, supabaseAdmin } from '../lib/supabase';
 import * as teacherApi from '../lib/teacherApi';
 
 // ActivityCard Component
@@ -107,6 +107,8 @@ const TeacherHomeScreen = ({ navigation }) => {
   const [showCompletedDailyPlans, setShowCompletedDailyPlans] = useState(false);
   const [showCompletedWeeklyPlans, setShowCompletedWeeklyPlans] = useState(false);
   const [expandedPlans, setExpandedPlans] = useState(new Set());
+  const [planSearchQuery, setPlanSearchQuery] = useState('');
+  const [isGuidanceTeacher, setIsGuidanceTeacher] = useState(false);
 
   useEffect(() => {
     loadTeacherData();
@@ -161,17 +163,136 @@ const TeacherHomeScreen = ({ navigation }) => {
   const loadStudents = async () => {
     try {
       setPlansLoading(true);
-      const result = await teacherApi.getStudents();
       
-      if (result.success) {
-        setStudents(result.data || []);
-      } else {
-        console.error('Öğrenciler yüklenirken hata:', result.error);
-        Alert.alert('Hata', result.error);
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        Alert.alert('Hata', 'Kullanıcı oturumu bulunamadı');
+        setPlansLoading(false);
+        return;
       }
+
+      // Öğretmen ID'sini al
+      const { data: teacherData, error: teacherError } = await supabase
+        .from('teachers')
+        .select('id')
+        .eq('user_id', user.id)
+        .single();
+
+      if (teacherError || !teacherData) {
+        console.error('Öğretmen bulunamadı:', teacherError);
+        Alert.alert('Hata', 'Öğretmen bilgisi bulunamadı');
+        setPlansLoading(false);
+        return;
+      }
+
+      let studentIds = [];
+      let isGuidanceTeacherLocal = false;
+
+      // Rehber öğretmen kontrolü - Kurumunun rehber öğretmeni mi?
+      const { data: institutionData, error: institutionError } = await supabase
+        .from('institutions')
+        .select('id, name')
+        .eq('guidance_teacher_id', teacherData.id)
+        .eq('is_active', true)
+        .maybeSingle();
+
+      if (!institutionError && institutionData) {
+        isGuidanceTeacherLocal = true;
+        
+        // Rehber öğretmen - Kurumundaki tüm öğrencilerin planlarını göster
+        const { data: institutionMemberships, error: membershipError } = await supabase
+          .from('institution_memberships')
+          .select('user_id')
+          .eq('institution_id', institutionData.id)
+          .eq('role', 'student')
+          .eq('is_active', true);
+
+        if (!membershipError && institutionMemberships?.length > 0) {
+          studentIds = institutionMemberships.map(m => m.user_id).filter(Boolean);
+        }
+      } else {
+        // Normal öğretmen - Bağlı öğrencileri al
+        const { data: studentConnections, error: studentsError } = await supabase
+          .from('student_teachers')
+          .select('student_id')
+          .eq('teacher_id', teacherData.id)
+          .eq('is_active', true)
+          .order('join_date', { ascending: false });
+
+        if (studentsError) {
+          console.error('Öğrenciler yüklenirken hata:', studentsError);
+          Alert.alert('Hata', 'Bağlı öğrenciler yüklenemedi: ' + studentsError.message);
+          setPlansLoading(false);
+          return;
+        }
+
+        if (!studentConnections || studentConnections.length === 0) {
+          setStudents([]);
+          setPlansLoading(false);
+          return;
+        }
+
+        // Öğrenci ID'lerini al
+        const studentIds = studentConnections.map(conn => conn.student_id).filter(Boolean);
+
+        // Öğrenci profil verilerini al
+        const { data: studentProfiles, error: profileError } = await supabase
+          .from('user_profiles')
+          .select('user_id, name, email, selected_avatar')
+          .in('user_id', studentIds);
+
+        if (profileError) {
+          console.error('Öğrenci profilleri yüklenirken hata:', profileError);
+          Alert.alert('Hata', 'Öğrenci profilleri yüklenemedi: ' + profileError.message);
+          setPlansLoading(false);
+          return;
+        }
+
+        // Öğrenci verilerini formatla
+        const studentsData = (studentProfiles || []).map(profile => ({
+          id: profile.user_id,
+          name: profile.name || 'İsimsiz Öğrenci',
+          email: profile.email || '',
+          avatar_url: profile.selected_avatar || null,
+        }));
+
+        setStudents(studentsData);
+        setPlansLoading(false);
+        return;
+      }
+
+      if (studentIds.length === 0) {
+        setStudents([]);
+        setPlansLoading(false);
+        return;
+      }
+
+      // Öğrenci profil verilerini al
+      const queryClient = isGuidanceTeacherLocal ? supabaseAdmin : supabase;
+      
+      const { data: studentProfiles, error: profileError } = await queryClient
+        .from('user_profiles')
+        .select('user_id, name, email, selected_avatar')
+        .in('user_id', studentIds);
+
+      if (profileError) {
+        console.error('Öğrenci profilleri yüklenirken hata:', profileError);
+        Alert.alert('Hata', 'Öğrenci profilleri yüklenemedi: ' + profileError.message);
+        setPlansLoading(false);
+        return;
+      }
+
+      const studentsData = (studentProfiles || []).map(profile => ({
+        id: profile.user_id,
+        name: profile.name || 'İsimsiz Öğrenci',
+        email: profile.email,
+        avatar_url: profile.selected_avatar || null,
+      }));
+
+      setStudents(studentsData);
     } catch (error) {
       console.error('Öğrenciler yüklenirken hata:', error);
-      Alert.alert('Hata', 'Bir hata oluştu.');
+      Alert.alert('Hata', 'Öğrenciler yüklenirken bir hata oluştu: ' + error.message);
     } finally {
       setPlansLoading(false);
     }
@@ -195,23 +316,102 @@ const TeacherHomeScreen = ({ navigation }) => {
   const loadStudentPlans = async (studentId) => {
     setStudentPlansLoading(true);
     try {
+      // Rehber öğretmen kontrolü yap
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        setStudentPlansLoading(false);
+        return;
+      }
+
+      const { data: teacherData, error: teacherError } = await supabase
+        .from('teachers')
+        .select('id')
+        .eq('user_id', user.id)
+        .single();
+
+      if (teacherError || !teacherData) {
+        console.error('Öğretmen bulunamadı:', teacherError);
+        setStudentPlansLoading(false);
+        return;
+      }
+
+      // Rehber öğretmen kontrolü
+      let isGuidanceTeacherLocal = false;
+      const { data: institutionData } = await supabase
+        .from('institutions')
+        .select('id')
+        .eq('guidance_teacher_id', teacherData.id)
+        .eq('is_active', true)
+        .maybeSingle();
+
+      if (institutionData) {
+        isGuidanceTeacherLocal = true;
+        setIsGuidanceTeacher(true);
+      }
+
+      // Rehber öğretmen ise supabaseAdmin kullan
+      const queryClient = isGuidanceTeacherLocal ? supabaseAdmin : supabase;
+
       // Günlük planları al
-      const { data: dailyPlans } = await supabase
+      const { data: dailyPlans, error: dailyError } = await queryClient
         .from('student_daily_plans')
         .select('*')
         .eq('student_id', studentId)
         .order('plan_date', { ascending: false });
 
+      if (dailyError) {
+        console.error('Günlük planlar yüklenirken hata:', dailyError);
+      }
+
       // Haftalık planları al
-      const { data: weeklyPlans } = await supabase
+      const { data: weeklyPlans, error: weeklyError } = await queryClient
         .from('student_weekly_plans')
         .select('*')
         .eq('student_id', studentId)
         .order('week_start_date', { ascending: false });
 
+      if (weeklyError) {
+        console.error('Haftalık planlar yüklenirken hata:', weeklyError);
+      }
+
+      // Rehber öğretmen kontrolü - Planları yükledikten sonra her plan için rehber öğretmen kontrolü yap
+      const enrichedDailyPlans = await Promise.all((dailyPlans || []).map(async (plan) => {
+        if (plan.teacher_id) {
+          const { data: guidanceInstitution } = await supabase
+            .from('institutions')
+            .select('id')
+            .eq('guidance_teacher_id', plan.teacher_id)
+            .eq('is_active', true)
+            .maybeSingle();
+          
+          return {
+            ...plan,
+            isGuidanceTeacher: !!guidanceInstitution
+          };
+        }
+        return plan;
+      }));
+
+      const enrichedWeeklyPlans = await Promise.all((weeklyPlans || []).map(async (plan) => {
+        if (plan.teacher_id) {
+          const { data: guidanceInstitution } = await supabase
+            .from('institutions')
+            .select('id')
+            .eq('guidance_teacher_id', plan.teacher_id)
+            .eq('is_active', true)
+            .maybeSingle();
+          
+          return {
+            ...plan,
+            isGuidanceTeacher: !!guidanceInstitution
+          };
+        }
+        return plan;
+      }));
+
       setStudentPlans({
-        daily: dailyPlans || [],
-        weekly: weeklyPlans || []
+        daily: enrichedDailyPlans || [],
+        weekly: enrichedWeeklyPlans || []
       });
     } catch (error) {
       console.error('Öğrenci planları yüklenirken hata:', error);
@@ -227,13 +427,16 @@ const TeacherHomeScreen = ({ navigation }) => {
     
     const interval = setInterval(async () => {
       try {
+        // Rehber öğretmen kontrolü için queryClient kullan
+        const queryClient = isGuidanceTeacher ? supabaseAdmin : supabase;
+        
         // Sadece plan sayısını ve tamamlanma durumunu kontrol et
-        const { data: dailyPlans } = await supabase
+        const { data: dailyPlans } = await queryClient
           .from('student_daily_plans')
           .select('id, is_completed')
           .eq('student_id', selectedStudent.id);
 
-        const { data: weeklyPlans } = await supabase
+        const { data: weeklyPlans } = await queryClient
           .from('student_weekly_plans')
           .select('id, is_completed')
           .eq('student_id', selectedStudent.id);
@@ -265,7 +468,7 @@ const TeacherHomeScreen = ({ navigation }) => {
     }, 3000); // 3 saniyede bir kontrol et
 
     return () => clearInterval(interval);
-  }, [showStudentPlansModal, selectedStudent, studentPlans]);
+  }, [showStudentPlansModal, selectedStudent, studentPlans, isGuidanceTeacher]);
 
   const handleSavePlan = async () => {
     if (!planTitle.trim() || !planDescription.trim()) {
@@ -320,31 +523,15 @@ const TeacherHomeScreen = ({ navigation }) => {
           style: 'destructive',
           onPress: async () => {
             try {
-              console.log('DEBUG: Plan siliniyor:', { 
-                planId: plan.id, 
-                planType, 
-                tableName: planType === 'daily' ? 'student_daily_plans' : 'student_weekly_plans',
-                planTeacherId: plan.teacher_id,
-                isTeacherPlan: !!plan.teacher_id
-              });
-              
-              // Önce planın var olup olmadığını kontrol et
-              const { data: existingPlan, error: checkError } = await supabase
-                .from(planType === 'daily' ? 'student_daily_plans' : 'student_weekly_plans')
-                .select('id, teacher_id')
-                .eq('id', plan.id)
-                .single();
-                
-              console.log('DEBUG: Plan kontrolü:', { existingPlan, checkError });
+              // Rehber öğretmen kontrolü için queryClient kullan
+              const queryClient = isGuidanceTeacher ? supabaseAdmin : supabase;
               
               const tableName = planType === 'daily' ? 'student_daily_plans' : 'student_weekly_plans';
-              const { data, error } = await supabase
+              const { data, error } = await queryClient
                 .from(tableName)
                 .delete()
                 .eq('id', plan.id)
                 .select();
-
-              console.log('DEBUG: Silme sonucu:', { data, error });
 
               if (error) throw error;
 
@@ -380,18 +567,17 @@ const TeacherHomeScreen = ({ navigation }) => {
           style: 'destructive',
           onPress: async () => {
             try {
+              // Rehber öğretmen kontrolü için queryClient kullan
+              const queryClient = isGuidanceTeacher ? supabaseAdmin : supabase;
+              
               const tableName = planType === 'daily' ? 'student_daily_plans' : 'student_weekly_plans';
               const planIds = completedPlans.map(plan => plan.id);
               
-              console.log('DEBUG: Toplu silme:', { planIds, tableName, planType });
-              
-              const { data, error } = await supabase
+              const { data, error } = await queryClient
                 .from(tableName)
                 .delete()
                 .in('id', planIds)
                 .select();
-
-              console.log('DEBUG: Toplu silme sonucu:', { data, error });
 
               if (error) throw error;
 
@@ -517,6 +703,11 @@ const TeacherHomeScreen = ({ navigation }) => {
         .eq('user_id', user.id)
         .single();
       
+      if (!teacherResult.data) {
+        setLoading(false);
+        return;
+      }
+
       // Öğretmen adını ve branşını set et
       if (teacherResult.data?.name) {
         setTeacherName(teacherResult.data.name);
@@ -525,26 +716,67 @@ const TeacherHomeScreen = ({ navigation }) => {
         setTeacherBranch(teacherResult.data.branch);
       }
       
-      
-      const { data: students, error: studentsError } = await supabase
-        .from('student_teachers')
-        .select(`
-          id,
-          student_id
-        `)
-        .eq('teacher_id', teacherResult.data?.id)
-        .eq('is_active', true);
-      
+      let connectedStudentIds = [];
+      let isGuidanceTeacher = false;
 
-      if (studentsError) {
-        console.error('Öğrenciler yüklenirken hata:', studentsError);
+      // Rehber öğretmen kontrolü - Kurumunun rehber öğretmeni mi?
+      const { data: institutionData, error: institutionError } = await supabase
+        .from('institutions')
+        .select('id, name')
+        .eq('guidance_teacher_id', teacherResult.data.id)
+        .eq('is_active', true)
+        .maybeSingle();
+
+      if (!institutionError && institutionData) {
+        isGuidanceTeacher = true;
+        
+        // Rehber öğretmen - Kurumundaki tüm öğrencilerin çalışmalarını göster
+        const { data: institutionMemberships, error: membershipError } = await supabase
+          .from('institution_memberships')
+          .select('user_id')
+          .eq('institution_id', institutionData.id)
+          .eq('role', 'student')
+          .eq('is_active', true);
+
+        if (!membershipError && institutionMemberships?.length > 0) {
+          connectedStudentIds = institutionMemberships.map(m => m.user_id).filter(Boolean);
+        }
+      } else {
+        // Normal öğretmen - Bağlı öğrencileri al
+        const { data: students, error: studentsError } = await supabase
+          .from('student_teachers')
+          .select(`
+            id,
+            student_id
+          `)
+          .eq('teacher_id', teacherResult.data.id)
+          .eq('is_active', true);
+
+        if (studentsError) {
+          console.error('Öğrenciler yüklenirken hata:', studentsError);
+          setLoading(false);
+          return;
+        }
+
+        connectedStudentIds = students?.map(student => student.student_id) || [];
+      }
+      
+      // Öğrenci yoksa istatistikleri sıfırla ve çık
+      if (connectedStudentIds.length === 0) {
+        setStats({
+          totalStudents: 0,
+          weeklyStudies: 0,
+          avgFocus: 0,
+          todayStudies: 0
+        });
+        setRecentActivities([]);
+        setLoading(false);
         return;
       }
 
-      const connectedStudentIds = students?.map(student => student.student_id) || [];
-      
       // Öğrenci profil verilerini al
-      const { data: studentProfiles, error: profileError } = await supabase
+      const queryClient = isGuidanceTeacher ? supabaseAdmin : supabase;
+      const { data: studentProfiles, error: profileError } = await queryClient
         .from('user_profiles')
         .select('user_id, name, email')
         .in('user_id', connectedStudentIds);
@@ -564,9 +796,10 @@ const TeacherHomeScreen = ({ navigation }) => {
       const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
       const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
       
-      for (const student of students || []) {
+      // Öğrenci ID'leri üzerinden döngü
+      for (const studentId of connectedStudentIds) {
         // Her öğrenci için tüm çalışma verilerini getir
-        const { data: studyLogs, error: studyError } = await supabase
+        const { data: studyLogs, error: studyError } = await queryClient
           .from('study_logs')
           .select(`
             id,
@@ -582,7 +815,7 @@ const TeacherHomeScreen = ({ navigation }) => {
             notes,
             created_at
           `)
-          .eq('user_id', student.student_id)
+          .eq('user_id', studentId)
           .order('study_date', { ascending: false })
           .limit(100); // Daha fazla veri çek (tüm veriler için)
 
@@ -600,7 +833,7 @@ const TeacherHomeScreen = ({ navigation }) => {
         // Son aktiviteleri ekle
         studyLogs?.forEach(log => {
           // Gerçek öğrenci ismini user_profiles'den çek
-          const studentProfile = studentProfiles?.find(p => p.user_id === student.student_id);
+          const studentProfile = studentProfiles?.find(p => p.user_id === studentId);
           const studentName = studentProfile?.name || 'Öğrenci';
           
           recentActivities.push({
@@ -648,7 +881,7 @@ const TeacherHomeScreen = ({ navigation }) => {
       // İstatistikleri güncelle
       setStats(prev => ({
         ...prev,
-        totalStudents: students?.length || 0,
+        totalStudents: connectedStudentIds.length,
         weeklyStudies,
         avgFocus: Number(avgFocus.toFixed(1)),
         todayStudies
@@ -770,8 +1003,8 @@ const TeacherHomeScreen = ({ navigation }) => {
               style={styles.quickActionButton}
               onPress={() => navigation.navigate('TeacherAdd')}
             >
-              <Ionicons name="person-add-outline" size={24} color={colors.primary} />
-              <Text style={styles.quickActionText}>Öğrenci Ekle</Text>
+              <Ionicons name="people-outline" size={24} color={colors.primary} />
+              <Text style={styles.quickActionText}>Öğrenciler</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -923,8 +1156,34 @@ const TeacherHomeScreen = ({ navigation }) => {
                   <Text style={styles.loadingText}>Öğrenciler yükleniyor...</Text>
                 </View>
               ) : students.length > 0 ? (
-                <ScrollView style={styles.studentsList} showsVerticalScrollIndicator={false}>
-                  {students.map((student) => (
+                <>
+                  {/* Arama Input */}
+                  <View style={styles.searchContainer}>
+                    <Ionicons name="search" size={20} color={colors.textSecondary} style={styles.searchIcon} />
+                    <TextInput
+                      style={styles.searchInput}
+                      placeholder="Öğrenci adı ile ara..."
+                      value={planSearchQuery}
+                      onChangeText={setPlanSearchQuery}
+                      placeholderTextColor={colors.textSecondary}
+                    />
+                    {planSearchQuery.length > 0 && (
+                      <TouchableOpacity
+                        style={styles.clearSearchButton}
+                        onPress={() => setPlanSearchQuery('')}
+                      >
+                        <Ionicons name="close-circle" size={20} color={colors.textSecondary} />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                  
+                  <ScrollView style={styles.studentsList} showsVerticalScrollIndicator={false}>
+                    {students
+                      .filter(student =>
+                        student.name.toLowerCase().includes(planSearchQuery.toLowerCase()) ||
+                        student.email?.toLowerCase().includes(planSearchQuery.toLowerCase())
+                      )
+                      .map((student) => (
                     <View key={student.id} style={styles.studentCard}>
                       <View style={styles.studentInfo}>
                         <View style={styles.avatarContainer}>
@@ -951,13 +1210,31 @@ const TeacherHomeScreen = ({ navigation }) => {
                       <Text style={styles.viewPlanButtonText}>Planları Gör</Text>
                     </TouchableOpacity>
                     </View>
-                  ))}
-                </ScrollView>
+                      ))}
+                  </ScrollView>
+                  
+                  {students.filter(student =>
+                    student.name.toLowerCase().includes(planSearchQuery.toLowerCase()) ||
+                    student.email?.toLowerCase().includes(planSearchQuery.toLowerCase())
+                  ).length === 0 && planSearchQuery.length > 0 && (
+                    <View style={styles.emptySearchContainer}>
+                      <Ionicons name="search-outline" size={48} color={colors.textSecondary} />
+                      <Text style={styles.emptySearchText}>Arama sonucu bulunamadı</Text>
+                      <Text style={styles.emptySearchSubtext}>"{planSearchQuery}" için öğrenci bulunamadı</Text>
+                    </View>
+                  )}
+                </>
               ) : (
                 <View style={styles.emptyContainer}>
                   <Ionicons name="people" size={64} color={colors.textSecondary} />
-                  <Text style={styles.emptyText}>Bağlı öğrenci yok</Text>
-                  <Text style={styles.emptySubtext}>Öğrenciler bağlandığında burada görünecek</Text>
+                  <Text style={styles.emptyText}>
+                    {students.length === 0 && !plansLoading ? 'Öğrenci bulunamadı' : 'Bağlı öğrenci yok'}
+                  </Text>
+                  <Text style={styles.emptySubtext}>
+                    {students.length === 0 && !plansLoading 
+                      ? 'Kurumunuzda henüz öğrenci kaydı bulunmuyor' 
+                      : 'Öğrenciler bağlandığında burada görünecek'}
+                  </Text>
                 </View>
               )}
             </View>
@@ -1141,14 +1418,20 @@ const TeacherHomeScreen = ({ navigation }) => {
                             <View style={styles.planTitleContainer}>
                               <Text style={styles.planItemTitle}>{plan.title}</Text>
                               {/* Plan türü badge'i */}
-                              <View style={isTeacherPlan ? styles.teacherPlanBadge : styles.studentPlanBadge}>
+                              <View style={[
+                                isTeacherPlan ? styles.teacherPlanBadge : styles.studentPlanBadge,
+                                plan.isGuidanceTeacher && styles.guidanceTeacherPlanBadge
+                              ]}>
                                 <Ionicons 
-                                  name={isTeacherPlan ? "school" : "person"} 
+                                  name={plan.isGuidanceTeacher ? "shield-checkmark" : (isTeacherPlan ? "school" : "person")} 
                                   size={10} 
                                   color="#fff" 
                                 />
                                 <Text style={styles.planBadgeText}>
-                                  {isTeacherPlan ? 'Öğretmen' : 'Öğrenci'}
+                                  {plan.isGuidanceTeacher 
+                                    ? 'Rehber Öğretmen' 
+                                    : (isTeacherPlan ? 'Öğretmen' : 'Öğrenci')
+                                  }
                                 </Text>
                               </View>
                             </View>
@@ -1295,14 +1578,20 @@ const TeacherHomeScreen = ({ navigation }) => {
                             <View style={styles.planTitleContainer}>
                               <Text style={styles.planItemTitle}>{plan.title}</Text>
                               {/* Plan türü badge'i */}
-                              <View style={isTeacherPlan ? styles.teacherPlanBadge : styles.studentPlanBadge}>
+                              <View style={[
+                                isTeacherPlan ? styles.teacherPlanBadge : styles.studentPlanBadge,
+                                plan.isGuidanceTeacher && styles.guidanceTeacherPlanBadge
+                              ]}>
                                 <Ionicons 
-                                  name={isTeacherPlan ? "school" : "person"} 
+                                  name={plan.isGuidanceTeacher ? "shield-checkmark" : (isTeacherPlan ? "school" : "person")} 
                                   size={10} 
                                   color="#fff" 
                                 />
                                 <Text style={styles.planBadgeText}>
-                                  {isTeacherPlan ? 'Öğretmen' : 'Öğrenci'}
+                                  {plan.isGuidanceTeacher 
+                                    ? 'Rehber Öğretmen' 
+                                    : (isTeacherPlan ? 'Öğretmen' : 'Öğrenci')
+                                  }
                                 </Text>
                               </View>
                             </View>
@@ -1738,6 +2027,47 @@ const createStyles = (colors) => StyleSheet.create({
   plansContent: {
     maxHeight: 400,
   },
+  searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.background,
+    borderRadius: 8,
+    marginHorizontal: 16,
+    marginBottom: 12,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  searchIcon: {
+    marginRight: 8,
+  },
+  searchInput: {
+    flex: 1,
+    paddingVertical: 10,
+    fontSize: SIZES.body,
+    color: colors.textPrimary,
+  },
+  clearSearchButton: {
+    padding: 4,
+  },
+  emptySearchContainer: {
+    alignItems: 'center',
+    padding: 40,
+    justifyContent: 'center',
+  },
+  emptySearchText: {
+    fontSize: SIZES.body,
+    fontWeight: '600',
+    color: colors.textSecondary,
+    marginTop: 16,
+    textAlign: 'center',
+  },
+  emptySearchSubtext: {
+    fontSize: SIZES.small,
+    color: colors.textLight,
+    marginTop: 8,
+    textAlign: 'center',
+  },
   studentsList: {
     maxHeight: 300,
   },
@@ -1980,6 +2310,9 @@ const createStyles = (colors) => StyleSheet.create({
     borderRadius: 12,
     alignSelf: 'flex-start',
     marginBottom: 8,
+  },
+  guidanceTeacherPlanBadge: {
+    backgroundColor: '#673AB7', // Daha koyu mor rehber öğretmen için
   },
   studentPlanBadge: {
     flexDirection: 'row',

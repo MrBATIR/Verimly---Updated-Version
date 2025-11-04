@@ -1,13 +1,23 @@
 import React, { useState, useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { View } from 'react-native';
+import { View, LogBox } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+
+// React Navigation development-only warning'lerini bastır
+LogBox.ignoreLogs([
+  'The action \'NAVIGATE\' with payload',
+  'Do you have a screen named',
+]);
 import BottomTabNavigator from './src/navigation/BottomTabNavigator';
 import LoginScreen from './src/screens/LoginScreen';
 import RegisterScreen from './src/screens/RegisterScreen';
+import AdminLoginScreen from './src/screens/AdminLoginScreen';
+import AdminDashboardScreen from './src/screens/AdminDashboardScreen';
+import InstitutionAdminLoginScreen from './src/screens/InstitutionAdminLoginScreen';
+import InstitutionAdminScreen from './src/screens/InstitutionAdminScreen';
 import SplashScreen from './src/components/SplashScreen';
 import { supabase } from './src/lib/supabase';
 import { COLORS, DARK_COLORS } from './src/constants/theme';
@@ -23,18 +33,18 @@ function AppContent() {
 
   useEffect(() => {
     let timeoutId;
+    let isResolved = false;
     
-    // Çok kısa timeout ile session kontrolü (1 saniye)
-    const sessionPromise = supabase.auth.getSession();
-    const timeoutPromise = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => reject(new Error('Session check timeout')), 1000);
-    });
-
-    Promise.race([sessionPromise, timeoutPromise])
+    // Session kontrolü - timeout süresini artırdık (5 saniye)
+    supabase.auth.getSession()
       .then(({ data: { session }, error }) => {
+        if (isResolved) return;
+        isResolved = true;
         clearTimeout(timeoutId);
+        
         if (error) {
-          console.log('Session error:', error);
+          // Sadece gerçek hataları log'la
+          console.error('Session error:', error);
           setSession(null);
         } else {
           setSession(session);
@@ -42,15 +52,46 @@ function AppContent() {
         setLoading(false);
       })
       .catch((error) => {
+        if (isResolved) return;
+        isResolved = true;
         clearTimeout(timeoutId);
-        console.log('Session check failed or timeout:', error);
+        // Sadece gerçek hataları log'la (timeout sessizce handle edilir)
+        console.error('Session check error:', error);
         setSession(null);
         setLoading(false);
       });
+    
+    // Timeout kontrolü - sessizce handle et
+    timeoutId = setTimeout(() => {
+      if (!isResolved) {
+        isResolved = true;
+        // Timeout durumunda sessizce devam et (log yok)
+        setSession(null);
+        setLoading(false);
+      }
+    }, 5000);
 
     // Session değişikliklerini dinle
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      // Eğer session null ise veya SIGNED_OUT eventi varsa session'ı temizle
+      if (event === 'SIGNED_OUT' || !session) {
+        setSession(null);
+      } else {
+        // Session geçerli mi kontrol et
+        try {
+          const { data: { user }, error } = await supabase.auth.getUser();
+          if (error || !user) {
+            // Kullanıcı bulunamazsa session'ı null yap
+            setSession(null);
+            await supabase.auth.signOut();
+          } else {
+            setSession(session);
+          }
+        } catch (error) {
+          console.log('Session validation error:', error);
+          setSession(null);
+        }
+      }
     });
 
     return () => {
@@ -92,6 +133,41 @@ function AppContent() {
                     headerShown: true,
                     headerTitle: '',
                     headerBackVisible: true,
+                  }}
+                />
+                <Stack.Screen 
+                  name="AdminLogin" 
+                  component={AdminLoginScreen}
+                  options={{
+                    headerShown: true,
+                    headerTitle: 'Admin Girişi',
+                    headerBackVisible: true,
+                  }}
+                />
+                <Stack.Screen 
+                  name="AdminDashboard" 
+                  component={AdminDashboardScreen}
+                  options={{
+                    headerShown: true,
+                    headerTitle: 'Admin Panel',
+                    headerBackVisible: true,
+                  }}
+                />
+                <Stack.Screen 
+                  name="InstitutionAdminLogin" 
+                  component={InstitutionAdminLoginScreen}
+                  options={{
+                    headerShown: true,
+                    headerTitle: 'Kurum Admin Girişi',
+                    headerBackVisible: true,
+                  }}
+                />
+                <Stack.Screen 
+                  name="InstitutionAdmin" 
+                  component={InstitutionAdminScreen}
+                  options={{
+                    headerShown: false, // Custom header kullanıyoruz
+                    gestureEnabled: false, // Swipe back'ı devre dışı bırak
                   }}
                 />
                 <Stack.Screen 

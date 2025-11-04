@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Animated, TextInput, Modal, Image } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { CommonActions } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Container, Card, Button, SwipeableRow, StudyDetailModal, AdBanner } from '../components';
 import { useRewardedAdNew } from '../components/AdRewardedNew';
@@ -50,6 +51,7 @@ export default function DashboardScreen({ navigation, route }) {
   const [newSessionName, setNewSessionName] = useState(''); // Yeni çalışma için ad
   const [showShareModal, setShowShareModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
   const timerIntervalRef = useRef(null);
   const viewShotRef = useRef(null);
 
@@ -442,6 +444,7 @@ export default function DashboardScreen({ navigation, route }) {
     }
   };
 
+
   const loadSelectedAvatar = async () => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
@@ -474,19 +477,47 @@ export default function DashboardScreen({ navigation, route }) {
 
   const checkAuthStatus = async () => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      setIsDemo(!user); // Kullanıcı yoksa demo mod
+      const { data: { user }, error: authError } = await supabase.auth.getUser();
       
-      if (user) {
-        getUserProfile();
-        fetchRecentLogs();
-      } else {
-        loadDemoData();
+      // Session kontrolü - eğer kullanıcı yoksa veya hata varsa demo moda geç veya login'e yönlendir
+      if (authError || !user) {
+        setIsDemo(true);
+        // Eğer demo modda değilse ve navigation varsa login'e yönlendir
+        if (navigation && navigation.dispatch) {
+          await supabase.auth.signOut();
+          navigation.dispatch(
+            CommonActions.reset({
+              index: 0,
+              routes: [{ name: 'Login' }],
+            })
+          );
+        } else {
+          loadDemoData();
+        }
+        return;
       }
+      
+      setIsDemo(false);
+      getUserProfile();
+      fetchRecentLogs();
     } catch (error) {
       console.error('Auth check error:', error);
       setIsDemo(true);
-      loadDemoData();
+      try {
+        await supabase.auth.signOut();
+        if (navigation && navigation.dispatch) {
+          navigation.dispatch(
+            CommonActions.reset({
+              index: 0,
+              routes: [{ name: 'Login' }],
+            })
+          );
+        } else {
+          loadDemoData();
+        }
+      } catch (signOutError) {
+        loadDemoData();
+      }
     }
   };
 
@@ -513,7 +544,22 @@ export default function DashboardScreen({ navigation, route }) {
 
   const getUserProfile = async () => {
     try {
-      const { data: { user: authUser } } = await supabase.auth.getUser();
+      const { data: { user: authUser }, error: authError } = await supabase.auth.getUser();
+      
+      // Session kontrolü - eğer kullanıcı yoksa veya hata varsa login'e yönlendir
+      if (authError || !authUser) {
+        console.log('Kullanıcı oturumu geçersiz, login ekranına yönlendiriliyor');
+        await supabase.auth.signOut();
+        if (navigation && navigation.dispatch) {
+          navigation.dispatch(
+            CommonActions.reset({
+              index: 0,
+              routes: [{ name: 'Login' }],
+            })
+          );
+        }
+        return;
+      }
       
       if (authUser) {
         // user_profiles tablosundan detaylı bilgileri çek
@@ -524,6 +570,20 @@ export default function DashboardScreen({ navigation, route }) {
           .single();
 
         if (profileError) {
+          // Eğer user_profiles'de kayıt yoksa ve kullanıcı veritabanından silinmişse
+          if (profileError.code === 'PGRST116' || profileError.message?.includes('0 rows')) {
+            console.log('Kullanıcı veritabanında bulunamadı, login ekranına yönlendiriliyor');
+            await supabase.auth.signOut();
+            if (navigation && navigation.dispatch) {
+              navigation.dispatch(
+                CommonActions.reset({
+                  index: 0,
+                  routes: [{ name: 'Login' }],
+                })
+              );
+            }
+            return;
+          }
           console.error('User profile bulunamadı:', profileError);
           // Profile bulunamazsa sadece auth user'ı kullan
           setUser({ ...authUser, profile: null });
@@ -549,11 +609,36 @@ export default function DashboardScreen({ navigation, route }) {
           
           setUser({ ...authUser, profile: updatedProfile });
         }
+      } else {
+        // Kullanıcı yoksa login'e yönlendir
+        console.log('Kullanıcı bulunamadı, login ekranına yönlendiriliyor');
+        await supabase.auth.signOut();
+        if (navigation && navigation.dispatch) {
+          navigation.dispatch(
+            CommonActions.reset({
+              index: 0,
+              routes: [{ name: 'Login' }],
+            })
+          );
+        }
       }
     } catch (error) {
       console.error('Kullanıcı bilgisi alınamadı:', error);
-      // Hata durumunda loading'i kapat
+      // Hata durumunda loading'i kapat ve login'e yönlendir
       setLoading(false);
+      try {
+        await supabase.auth.signOut();
+        if (navigation && navigation.dispatch) {
+          navigation.dispatch(
+            CommonActions.reset({
+              index: 0,
+              routes: [{ name: 'Login' }],
+            })
+          );
+        }
+      } catch (signOutError) {
+        console.error('Sign out hatası:', signOutError);
+      }
     }
   };
 
@@ -991,11 +1076,11 @@ export default function DashboardScreen({ navigation, route }) {
           {isDemo ? (
             <TouchableOpacity 
               style={styles.registerButton}
-              onPress={() => navigation.getParent()?.navigate('Register')}
+              onPress={() => setShowAuthModal(true)}
               activeOpacity={0.7}
             >
-              <Ionicons name="person-add-outline" size={20} color={colors.surface} />
-              <Text style={styles.registerText}>Kayıt Ol</Text>
+              <Ionicons name="log-in-outline" size={20} color={colors.surface} />
+              <Text style={styles.registerText}>Giriş</Text>
             </TouchableOpacity>
           ) : (
             <TouchableOpacity 
@@ -1068,12 +1153,16 @@ export default function DashboardScreen({ navigation, route }) {
           <Card style={styles.pomodoroCard}>
             <LinearGradient
               colors={timerState === 'working' 
-                ? [colors.primary, colors.primaryDark]
+                ? isDark
+                  ? ['#A5B4FC', '#818CF8'] // Soft indigo (koyu tema)
+                  : ['#C7D2FE', '#A5B4FC'] // Soft indigo (açık tema)
                 : timerState === 'break'
-                ? [colors.secondary, colors.secondaryDark]
+                ? isDark
+                  ? ['#6EE7B7', '#34D399'] // Soft yeşil (koyu tema)
+                  : ['#A7F3D0', '#6EE7B7'] // Soft yeşil (açık tema)
                 : isDark 
-                  ? ['#4338CA', '#3730A3'] // Daha koyu indigo tonları (koyu tema)
-                  : ['#6366F1', '#4F46E5']} // Normal primary renkleri (açık tema)
+                  ? ['#818CF8', '#6366F1'] // Soft indigo (koyu tema - idle)
+                  : ['#A5B4FC', '#818CF8']} // Soft indigo (açık tema - idle)
               style={styles.pomodoroGradient}
               start={{ x: 0, y: 0 }}
               end={{ x: 1, y: 1 }}
@@ -1115,7 +1204,9 @@ export default function DashboardScreen({ navigation, route }) {
                     activeOpacity={0.8}
                   >
                     <LinearGradient
-                      colors={['#10B981', '#059669']}
+                      colors={isDark 
+                        ? ['#6EE7B7', '#34D399'] // Soft yeşil (koyu tema)
+                        : ['#A7F3D0', '#6EE7B7']} // Soft yeşil (açık tema)
                       style={styles.startButtonGradient}
                       start={{ x: 0, y: 0 }}
                       end={{ x: 1, y: 1 }}
@@ -1662,7 +1753,8 @@ export default function DashboardScreen({ navigation, route }) {
                 style={[styles.modalButton, styles.modalButtonConfirm, { backgroundColor: colors.primary }]}
                 onPress={shareSummary}
               >
-                <Text style={[styles.modalButtonText, { color: '#FFF' }]}>
+                <Ionicons name="share-social" size={18} color="#FFF" />
+                <Text style={[styles.modalButtonText, { color: '#FFF', marginLeft: 8 }]}>
                   Paylaş
                 </Text>
               </TouchableOpacity>
@@ -1738,6 +1830,72 @@ export default function DashboardScreen({ navigation, route }) {
           </View>
         </View>
       )}
+
+      {/* Giriş/Kayıt Modal */}
+      <Modal
+        visible={showAuthModal}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowAuthModal(false)}
+      >
+        <TouchableOpacity 
+          style={styles.modalOverlay}
+          activeOpacity={1}
+          onPress={() => setShowAuthModal(false)}
+        >
+          <TouchableOpacity 
+            style={[styles.authModalContent, { backgroundColor: colors.surface }]}
+            activeOpacity={1}
+            onPress={(e) => e.stopPropagation()}
+          >
+            <View style={styles.authModalHeader}>
+              <Text style={[styles.authModalTitle, { color: colors.textPrimary }]}>
+                Hesabınıza Giriş Yapın
+              </Text>
+              <TouchableOpacity 
+                onPress={() => setShowAuthModal(false)}
+                style={styles.authModalCloseButton}
+              >
+                <Ionicons name="close" size={24} color={colors.textPrimary} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={[styles.authModalSubtitle, { color: colors.textSecondary }]}>
+              Uygulamayı kullanmaya devam etmek için hesabınıza giriş yapın veya yeni hesap oluşturun.
+            </Text>
+
+            <View style={styles.authModalButtons}>
+              <TouchableOpacity
+                style={[styles.authModalButton, { backgroundColor: colors.primary }]}
+                onPress={() => {
+                  setShowAuthModal(false);
+                  navigation.getParent()?.navigate('Login');
+                }}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="log-in-outline" size={24} color={colors.surface} />
+                <Text style={[styles.authModalButtonText, { color: colors.surface }]}>
+                  Giriş Yap
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.authModalButton, styles.authModalButtonSecondary, { borderColor: colors.primary }]}
+                onPress={() => {
+                  setShowAuthModal(false);
+                  navigation.getParent()?.navigate('Register');
+                }}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="person-add-outline" size={24} color={colors.primary} />
+                <Text style={[styles.authModalButtonText, styles.authModalButtonTextSecondary, { color: colors.primary }]}>
+                  Kayıt Ol
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
     </>
   );
 }
@@ -1975,17 +2133,17 @@ const createStyles = (colors) => StyleSheet.create({
     letterSpacing: 0.5,
   },
   pauseButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.3)',
+    backgroundColor: 'rgba(255, 255, 255, 0.25)',
     paddingVertical: 10,
     paddingHorizontal: 16,
   },
   resumeButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.3)',
+    backgroundColor: 'rgba(255, 255, 255, 0.25)',
     paddingVertical: 10,
     paddingHorizontal: 16,
   },
   stopButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
     paddingVertical: 10,
     paddingHorizontal: 16,
     marginLeft: 12,
@@ -2212,6 +2370,7 @@ const createStyles = (colors) => StyleSheet.create({
   modalActions: {
     flexDirection: 'row',
     gap: 12,
+    flexWrap: 'wrap',
   },
   modalButton: {
     flex: 1,
@@ -2219,10 +2378,15 @@ const createStyles = (colors) => StyleSheet.create({
     borderRadius: SIZES.radius,
     alignItems: 'center',
     justifyContent: 'center',
+    flexDirection: 'row',
+    minWidth: 100,
   },
   modalButtonCancel: {
     borderWidth: 1,
     backgroundColor: 'transparent',
+  },
+  modalButtonSecondary: {
+    // backgroundColor set dynamically
   },
   modalButtonConfirm: {
     // backgroundColor set dynamically
@@ -2555,6 +2719,57 @@ const createStyles = (colors) => StyleSheet.create({
     borderRadius: SIZES.radius,
     overflow: 'hidden',
     height: 60,
+  },
+  // Auth Modal Styles
+  authModalContent: {
+    width: '85%',
+    maxWidth: 400,
+    borderRadius: SIZES.radius * 2,
+    padding: SIZES.padding * 1.5,
+    ...SHADOWS.large,
+  },
+  authModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: SIZES.padding,
+  },
+  authModalTitle: {
+    fontSize: SIZES.h3,
+    fontWeight: 'bold',
+    flex: 1,
+  },
+  authModalCloseButton: {
+    padding: 4,
+  },
+  authModalSubtitle: {
+    fontSize: SIZES.body,
+    lineHeight: 22,
+    marginBottom: SIZES.padding * 1.5,
+    textAlign: 'center',
+  },
+  authModalButtons: {
+    gap: 12,
+  },
+  authModalButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: SIZES.padding,
+    paddingHorizontal: SIZES.padding * 1.5,
+    borderRadius: SIZES.radius,
+    gap: 8,
+  },
+  authModalButtonSecondary: {
+    backgroundColor: 'transparent',
+    borderWidth: 2,
+  },
+  authModalButtonText: {
+    fontSize: SIZES.body,
+    fontWeight: '600',
+  },
+  authModalButtonTextSecondary: {
+    // color will be set dynamically
   },
 });
 

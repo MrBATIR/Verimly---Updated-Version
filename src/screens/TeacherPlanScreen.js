@@ -13,7 +13,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import { Container, Button, Input, Card } from '../components';
-import { supabase } from '../lib/supabase';
+import { supabase, supabaseAdmin } from '../lib/supabase';
 
 const TeacherPlanScreen = ({ route }) => {
   const isDemo = route?.params?.isDemo || false;
@@ -29,6 +29,8 @@ const TeacherPlanScreen = ({ route }) => {
   const [planTitle, setPlanTitle] = useState('');
   const [planDescription, setPlanDescription] = useState('');
   const [planDate, setPlanDate] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isGuidanceTeacher, setIsGuidanceTeacher] = useState(false);
 
   useEffect(() => {
     if (isDemo) {
@@ -74,36 +76,103 @@ const TeacherPlanScreen = ({ route }) => {
     try {
       setLoading(true);
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-
-      const { data, error } = await supabase
-        .from('teacher_students')
-        .select(`
-          student_id,
-          user_profiles!teacher_students_student_id_fkey (
-            user_id,
-            name,
-            email,
-            avatar_url
-          )
-        `)
-        .eq('teacher_id', user.id);
-
-      if (error) {
-        console.error('Öğrenciler yüklenirken hata:', error);
+      if (!user) {
+        Alert.alert('Hata', 'Kullanıcı oturumu bulunamadı. Lütfen tekrar giriş yapın.');
+        setLoading(false);
         return;
       }
 
-      const studentsData = data.map(item => ({
-        id: item.student_id,
-        name: item.user_profiles.name || 'İsimsiz Öğrenci',
-        email: item.user_profiles.email,
-        avatar_url: item.user_profiles.avatar_url,
+      // Öğretmen ID'sini al
+      const { data: teacherData, error: teacherError } = await supabase
+        .from('teachers')
+        .select('id')
+        .eq('user_id', user.id)
+        .single();
+
+      if (teacherError || !teacherData) {
+        console.error('Öğretmen bulunamadı:', teacherError);
+        Alert.alert('Hata', 'Öğretmen bilgisi bulunamadı: ' + (teacherError?.message || 'Bilinmeyen hata'));
+        setLoading(false);
+        return;
+      }
+
+      let studentIds = [];
+      let isGuidanceTeacherLocal = false;
+
+      // Rehber öğretmen kontrolü - Kurumunun rehber öğretmeni mi?
+      const { data: institutionData, error: institutionError } = await supabase
+        .from('institutions')
+        .select('id, name')
+        .eq('guidance_teacher_id', teacherData.id)
+        .eq('is_active', true)
+        .maybeSingle();
+
+      if (!institutionError && institutionData) {
+        isGuidanceTeacherLocal = true;
+        setIsGuidanceTeacher(true);
+        
+        // Rehber öğretmen - Kurumundaki tüm öğrencilerin planlarını göster
+        const { data: institutionMemberships, error: membershipError } = await supabase
+          .from('institution_memberships')
+          .select('user_id')
+          .eq('institution_id', institutionData.id)
+          .eq('role', 'student')
+          .eq('is_active', true);
+
+        if (!membershipError && institutionMemberships?.length > 0) {
+          studentIds = institutionMemberships.map(m => m.user_id).filter(Boolean);
+        }
+      } else {
+        setIsGuidanceTeacher(false);
+        // Normal öğretmen - Bağlı öğrencileri al
+        const { data: students, error: studentsError } = await supabase
+          .from('student_teachers')
+          .select('student_id')
+          .eq('teacher_id', teacherData.id)
+          .eq('is_active', true);
+
+        if (studentsError) {
+          console.error('Öğrenciler yüklenirken hata:', studentsError);
+          Alert.alert('Hata', 'Bağlı öğrenciler yüklenemedi: ' + studentsError.message);
+          setLoading(false);
+          return;
+        }
+
+        studentIds = students?.map(student => student.student_id) || [];
+      }
+
+      if (studentIds.length === 0) {
+        setStudents([]);
+        setLoading(false);
+        return;
+      }
+
+      // Öğrenci profil verilerini al
+      const queryClient = isGuidanceTeacherLocal ? supabaseAdmin : supabase;
+      
+      const { data: studentProfiles, error: profileError } = await queryClient
+        .from('user_profiles')
+        .select('user_id, name, email, avatar_url')
+        .in('user_id', studentIds);
+
+      if (profileError) {
+        console.error('Öğrenci profilleri yüklenirken hata:', profileError);
+        Alert.alert('Hata', 'Öğrenci profilleri yüklenemedi: ' + profileError.message);
+        setLoading(false);
+        return;
+      }
+
+      const studentsData = (studentProfiles || []).map(profile => ({
+        id: profile.user_id,
+        name: profile.name || 'İsimsiz Öğrenci',
+        email: profile.email,
+        avatar_url: profile.avatar_url,
       }));
 
       setStudents(studentsData);
     } catch (error) {
       console.error('Öğrenciler yüklenirken hata:', error);
+      Alert.alert('Hata', 'Öğrenciler yüklenirken bir hata oluştu: ' + error.message);
     } finally {
       setLoading(false);
     }
@@ -120,7 +189,10 @@ const TeacherPlanScreen = ({ route }) => {
       const tableName = activeTab === 'daily' ? 'student_daily_plans' : 'student_weekly_plans';
       const dateField = activeTab === 'daily' ? 'plan_date' : 'week_start_date';
       
-      const { data, error } = await supabase
+      // Rehber öğretmen ise supabaseAdmin kullan
+      const queryClient = isGuidanceTeacher ? supabaseAdmin : supabase;
+      
+      const { data, error } = await queryClient
         .from(tableName)
         .select('*')
         .eq('student_id', studentId)
@@ -131,7 +203,25 @@ const TeacherPlanScreen = ({ route }) => {
         return;
       }
 
-      setStudentPlans(data || []);
+      // Rehber öğretmen kontrolü - Planları yükledikten sonra her plan için rehber öğretmen kontrolü yap
+      const enrichedPlans = await Promise.all((data || []).map(async (plan) => {
+        if (plan.teacher_id) {
+          const { data: guidanceInstitution } = await supabase
+            .from('institutions')
+            .select('id')
+            .eq('guidance_teacher_id', plan.teacher_id)
+            .eq('is_active', true)
+            .maybeSingle();
+          
+          return {
+            ...plan,
+            isGuidanceTeacher: !!guidanceInstitution
+          };
+        }
+        return plan;
+      }));
+
+      setStudentPlans(enrichedPlans || []);
     } catch (error) {
       console.error('Öğrenci planları yüklenirken hata:', error);
     } finally {
@@ -205,25 +295,50 @@ const TeacherPlanScreen = ({ route }) => {
 
     try {
       setLoading(true);
+      
+      // Öğretmen ID'sini al
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        Alert.alert('Hata', 'Kullanıcı oturumu bulunamadı');
+        setLoading(false);
+        return;
+      }
+
+      const { data: teacherData, error: teacherError } = await supabase
+        .from('teachers')
+        .select('id')
+        .eq('user_id', user.id)
+        .single();
+
+      if (teacherError || !teacherData) {
+        Alert.alert('Hata', 'Öğretmen bilgisi bulunamadı');
+        setLoading(false);
+        return;
+      }
+
       const tableName = activeTab === 'daily' ? 'student_daily_plans' : 'student_weekly_plans';
       const dateField = activeTab === 'daily' ? 'plan_date' : 'week_start_date';
+      
+      // Rehber öğretmen ise supabaseAdmin kullan
+      const queryClient = isGuidanceTeacher ? supabaseAdmin : supabase;
       
       const planData = {
         student_id: selectedStudent.id,
         title: planTitle.trim(),
         description: planDescription.trim(),
         [dateField]: planDate,
+        teacher_id: teacherData.id, // teacher_id ile öğrenci tarafında rehber öğretmen kontrolü yapılabilir
       };
 
       if (editingPlan) {
-        const { error } = await supabase
+        const { error } = await queryClient
           .from(tableName)
           .update(planData)
           .eq('id', editingPlan.id);
 
         if (error) throw error;
       } else {
-        const { error } = await supabase
+        const { error } = await queryClient
           .from(tableName)
           .insert(planData);
 
@@ -266,7 +381,10 @@ const TeacherPlanScreen = ({ route }) => {
       setLoading(true);
       const tableName = activeTab === 'daily' ? 'student_daily_plans' : 'student_weekly_plans';
       
-      const { error } = await supabase
+      // Rehber öğretmen ise supabaseAdmin kullan
+      const queryClient = isGuidanceTeacher ? supabaseAdmin : supabase;
+      
+      const { error } = await queryClient
         .from(tableName)
         .delete()
         .eq('id', plan.id);
@@ -314,56 +432,79 @@ const TeacherPlanScreen = ({ route }) => {
     </TouchableOpacity>
   );
 
-  const renderPlanItem = ({ item }) => (
-    <Card style={styles.planCard}>
-      <TouchableOpacity
-        style={styles.planContent}
-        onPress={() => handleEditPlan(item)}
-      >
-        <View style={styles.planHeader}>
-          <Text style={styles.planTitle}>{item.title}</Text>
-          <View style={[
-            styles.completionIndicator,
-            item.is_completed && styles.completedIndicator
-          ]}>
-            <Ionicons 
-              name={item.is_completed ? "checkmark" : "ellipse-outline"} 
-              size={24} 
-              color={item.is_completed ? "#4CAF50" : "#ccc"} 
-            />
+  const renderPlanItem = ({ item }) => {
+    const isTeacherPlan = item.teacher_id;
+    const isGuidanceTeacherPlan = item.isGuidanceTeacher;
+    
+    return (
+      <Card style={styles.planCard}>
+        <TouchableOpacity
+          style={styles.planContent}
+          onPress={() => handleEditPlan(item)}
+        >
+          <View style={styles.planHeader}>
+            <View style={styles.planTitleContainer}>
+              <Text style={styles.planTitle}>{item.title}</Text>
+              {/* Plan türü badge'i */}
+              {isTeacherPlan && (
+                <View style={[
+                  styles.teacherPlanBadge,
+                  isGuidanceTeacherPlan && styles.guidanceTeacherPlanBadge
+                ]}>
+                  <Ionicons 
+                    name={isGuidanceTeacherPlan ? "shield-checkmark" : "school"} 
+                    size={12} 
+                    color="#fff" 
+                  />
+                  <Text style={styles.teacherPlanBadgeText}>
+                    {isGuidanceTeacherPlan ? 'Rehber Öğretmen' : 'Öğretmen'}
+                  </Text>
+                </View>
+              )}
+            </View>
+            <View style={[
+              styles.completionIndicator,
+              item.is_completed && styles.completedIndicator
+            ]}>
+              <Ionicons 
+                name={item.is_completed ? "checkmark" : "ellipse-outline"} 
+                size={24} 
+                color={item.is_completed ? "#4CAF50" : "#ccc"} 
+              />
+            </View>
           </View>
-        </View>
-        
-        {item.description && (
-          <Text style={styles.planDescription}>{item.description}</Text>
-        )}
-        
-        <View style={styles.planFooter}>
-          <Text style={styles.planDate}>
-            {activeTab === 'daily' 
-              ? new Date(item.plan_date).toLocaleDateString('tr-TR')
-              : `${new Date(item.week_start_date).toLocaleDateString('tr-TR')} - ${new Date(new Date(item.week_start_date).getTime() + 6 * 24 * 60 * 60 * 1000).toLocaleDateString('tr-TR')}`
-            }
-          </Text>
-        </View>
-        
-        <View style={styles.planActions}>
-          <TouchableOpacity
-            style={styles.editButton}
-            onPress={() => handleEditPlan(item)}
-          >
-            <Ionicons name="create-outline" size={20} color="#007AFF" />
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.deleteButton}
-            onPress={() => handleDeletePlan(item)}
-          >
-            <Ionicons name="trash-outline" size={20} color="#ff6b6b" />
-          </TouchableOpacity>
-        </View>
-      </TouchableOpacity>
-    </Card>
-  );
+          
+          {item.description && (
+            <Text style={styles.planDescription}>{item.description}</Text>
+          )}
+          
+          <View style={styles.planFooter}>
+            <Text style={styles.planDate}>
+              {activeTab === 'daily' 
+                ? new Date(item.plan_date).toLocaleDateString('tr-TR')
+                : `${new Date(item.week_start_date).toLocaleDateString('tr-TR')} - ${new Date(new Date(item.week_start_date).getTime() + 6 * 24 * 60 * 60 * 1000).toLocaleDateString('tr-TR')}`
+              }
+            </Text>
+          </View>
+          
+          <View style={styles.planActions}>
+            <TouchableOpacity
+              style={styles.editButton}
+              onPress={() => handleEditPlan(item)}
+            >
+              <Ionicons name="create-outline" size={20} color="#007AFF" />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.deleteButton}
+              onPress={() => handleDeletePlan(item)}
+            >
+              <Ionicons name="trash-outline" size={20} color="#ff6b6b" />
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Card>
+    );
+  };
 
   if (loading && students.length === 0) {
     return (
@@ -384,15 +525,48 @@ const TeacherPlanScreen = ({ route }) => {
         {/* Students List */}
         <View style={styles.studentsSection}>
           <Text style={styles.sectionTitle}>Öğrenciler</Text>
-          <FlatList
-            data={students}
-            renderItem={renderStudentItem}
-            keyExtractor={(item) => item.id}
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={styles.studentsList}
-            contentContainerStyle={styles.studentsListContent}
-          />
+          
+          {students.length === 0 && !loading ? (
+            <View style={styles.emptyStudentsContainer}>
+              <Ionicons name="people-outline" size={48} color="#ccc" />
+              <Text style={styles.emptyStudentsText}>
+                {isGuidanceTeacher ? 'Kurumda öğrenci bulunamadı' : 'Bağlı öğrenci yok'}
+              </Text>
+              <Text style={styles.emptyStudentsSubtext}>
+                {isGuidanceTeacher 
+                  ? 'Kurumunuzda henüz öğrenci kaydı bulunmuyor' 
+                  : 'Öğrenciler bağlandığında burada görünecek'}
+              </Text>
+            </View>
+          ) : (
+            <>
+              {/* Search Input */}
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Öğrenci adı ile ara..."
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                placeholderTextColor="#999"
+              />
+              <FlatList
+                data={students.filter(student => 
+                  student.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                  student.email?.toLowerCase().includes(searchQuery.toLowerCase())
+                )}
+                renderItem={renderStudentItem}
+                keyExtractor={(item) => item.id}
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={styles.studentsList}
+                contentContainerStyle={styles.studentsListContent}
+                ListEmptyComponent={() => (
+                  <View style={styles.emptySearchContainer}>
+                    <Text style={styles.emptySearchText}>Arama sonucu bulunamadı</Text>
+                  </View>
+                )}
+              />
+            </>
+          )}
         </View>
 
         {selectedStudent && (
@@ -555,6 +729,46 @@ const styles = StyleSheet.create({
     marginHorizontal: 20,
     marginBottom: 10,
   },
+  searchInput: {
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    marginHorizontal: 20,
+    marginBottom: 10,
+    fontSize: 14,
+    borderWidth: 1,
+    borderColor: '#ddd',
+  },
+  emptyStudentsContainer: {
+    padding: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginHorizontal: 20,
+    marginTop: 20,
+  },
+  emptyStudentsText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#666',
+    marginTop: 16,
+    textAlign: 'center',
+  },
+  emptyStudentsSubtext: {
+    fontSize: 14,
+    color: '#999',
+    marginTop: 8,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  emptySearchContainer: {
+    padding: 20,
+    alignItems: 'center',
+  },
+  emptySearchText: {
+    fontSize: 14,
+    color: '#999',
+  },
   studentsList: {
     maxHeight: 100,
   },
@@ -657,12 +871,34 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     marginBottom: 8,
   },
+  planTitleContainer: {
+    flex: 1,
+    marginRight: 8,
+  },
   planTitle: {
     fontSize: 16,
     fontWeight: '600',
     color: '#333',
-    flex: 1,
-    marginRight: 8,
+    marginBottom: 4,
+  },
+  teacherPlanBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#9C27B0',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    alignSelf: 'flex-start',
+    marginTop: 4,
+  },
+  guidanceTeacherPlanBadge: {
+    backgroundColor: '#673AB7', // Daha koyu mor rehber öğretmen için
+  },
+  teacherPlanBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '500',
+    marginLeft: 4,
   },
   planDescription: {
     fontSize: 14,

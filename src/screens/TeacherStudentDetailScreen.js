@@ -1,11 +1,10 @@
-import React, { useState, useEffect } from 'react';
-import { useFocusEffect } from '@react-navigation/native';
+import React, { useState, useEffect, useMemo } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Modal, Dimensions } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../contexts/ThemeContext';
 import { DARK_COLORS, COLORS } from '../constants/theme';
 import { Container, Card } from '../components';
-import { supabase } from '../lib/supabase';
+import { supabase, supabaseAdmin } from '../lib/supabase';
 import Svg, { Circle, Path } from 'react-native-svg';
 
 // Gerçek dairesel pasta grafik komponenti
@@ -90,7 +89,76 @@ const PieChart = ({ data, size = 200, styles }) => {
 };
 
 const TeacherStudentDetailScreen = ({ route, navigation }) => {
-  const { studentId, studentData, selectedDate, viewMode } = route.params;
+  const params = route.params || {};
+  const { studentId, studentData, viewMode, isGuidanceTeacher } = params;
+  
+  // selectedDate'i Date objesine çevir ve useMemo ile stabilize et (her render'da yeni obje oluşmasın)
+  const selectedDate = useMemo(() => {
+    if (!params.selectedDate) {
+      const today = new Date();
+      const year = today.getUTCFullYear();
+      const month = today.getUTCMonth();
+      const day = today.getUTCDate();
+      return new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+    }
+    
+    // String olarak geçirilmiş olabilir (ISO format) veya Date objesi
+    const date = params.selectedDate instanceof Date 
+      ? new Date(params.selectedDate) 
+      : new Date(params.selectedDate);
+    
+    // Geçersiz tarih kontrolü
+    if (isNaN(date.getTime())) {
+      console.warn('Geçersiz tarih:', params.selectedDate, '- bugünün tarihini kullanıyorum');
+      const today = new Date();
+      const year = today.getUTCFullYear();
+      const month = today.getUTCMonth();
+      const day = today.getUTCDate();
+      return new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+    }
+    
+    // Tarih değerini normalize et
+    // TeacherReportsScreen'den gelen selectedDate ISO string formatında (toISOString() ile)
+    // Bu ISO string UTC olarak parse edilir, ama bu kullanıcının local tarihinin UTC karşılığıdır
+    // Örneğin: Kullanıcı Türkiye'de (UTC+3) "1 Kasım" seçerse:
+    //   - Local: 2025-11-01 00:00:00+03:00
+    //   - toISOString(): "2025-10-31T21:00:00.000Z" (31 Ekim UTC)
+    //   - Ama biz 1 Kasım UTC istiyoruz!
+    // 
+    // Çözüm: ISO string'den parse edilen tarih, kullanıcının seçtiği local tarihin UTC karşılığıdır
+    // Ama veritabanında kayıtlar UTC'de saklanıyor ve kullanıcı "1 Kasım" seçtiyse
+    // biz 1 Kasım UTC'yi istiyoruz, 31 Ekim UTC'yi değil.
+    // 
+    // Bu yüzden: ISO string'den sadece tarih kısmını (YYYY-MM-DD) çıkarıp UTC olarak oluşturmalıyız
+    // Veya daha iyisi: ISO string'den parse edip UTC değerlerini kullan, ama bu yanlış olabilir
+    
+    // En güvenli yol: String'den tarih kısmını parse et
+    const dateStr = params.selectedDate instanceof Date 
+      ? params.selectedDate.toISOString() 
+      : String(params.selectedDate);
+    
+    // ISO string formatı: "YYYY-MM-DDTHH:mm:ss.sssZ"
+    // Tarih kısmını çıkar: "YYYY-MM-DD"
+    const dateMatch = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    
+    if (dateMatch) {
+      // Tarih kısmını direkt parse et
+      const year = parseInt(dateMatch[1], 10);
+      const month = parseInt(dateMatch[2], 10) - 1; // Month is 0-based
+      const day = parseInt(dateMatch[3], 10);
+      return new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+    }
+    
+    // Fallback: Eski yöntem (eğer format beklenenden farklıysa)
+    const year = date.getFullYear();
+    const month = date.getMonth();
+    const day = date.getDate();
+    return new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+  }, [params.selectedDate]);
+  
+  // selectedDate'in timestamp'ini useMemo ile hesapla (dependency için)
+  const selectedDateTimestamp = useMemo(() => selectedDate?.getTime(), [selectedDate]);
+  
   const { isDark } = useTheme();
   const colors = isDark ? DARK_COLORS : COLORS;
   const styles = createStyles(colors);
@@ -99,28 +167,35 @@ const TeacherStudentDetailScreen = ({ route, navigation }) => {
   const [loading, setLoading] = useState(true);
   const [showDetailModal, setShowDetailModal] = useState(false);
 
-  useFocusEffect(
-    React.useCallback(() => {
+  // Modal içinde useFocusEffect yerine useEffect kullan (Modal bir navigation screen değil)
+  useEffect(() => {
+    if (studentId && selectedDate) {
       loadStudentLogs();
-    }, [studentId, selectedDate, viewMode])
-  );
+    }
+  }, [studentId, selectedDateTimestamp, viewMode, loadStudentLogs]);
 
   const getDateRange = () => {
+    if (!selectedDate) {
+      // selectedDate yoksa bugünü kullan
+      const today = new Date();
+      return { startDate: today, endDate: today };
+    }
+    
     const start = new Date(selectedDate);
     const end = new Date(selectedDate);
 
     if (viewMode === 'daily') {
-      // Sadece seçilen gün - Local time olarak
-      const year = selectedDate.getFullYear();
-      const month = selectedDate.getMonth();
-      const day = selectedDate.getDate();
+      // Sadece seçilen gün - UTC bazlı karşılaştırma için UTC kullan
+      const year = start.getUTCFullYear();
+      const month = start.getUTCMonth();
+      const day = start.getUTCDate();
       
-      // Local time kullan, UTC değil
-      start.setFullYear(year, month, day);
-      start.setHours(0, 0, 0, 0);
+      // UTC bazlı tarih için UTC set metodlarını kullan
+      start.setUTCFullYear(year, month, day);
+      start.setUTCHours(0, 0, 0, 0);
       
-      end.setFullYear(year, month, day);
-      end.setHours(23, 59, 59, 999);
+      end.setUTCFullYear(year, month, day);
+      end.setUTCHours(23, 59, 59, 999);
     } else if (viewMode === 'weekly') {
       // Seçili tarihten 6 gün öncesinden başlayarak 7 günlük aralık
       start.setDate(start.getDate() - 6); // 6 gün öncesi
@@ -137,54 +212,128 @@ const TeacherStudentDetailScreen = ({ route, navigation }) => {
     return { startDate: start, endDate: end };
   };
 
-  const loadStudentLogs = async () => {
+  const loadStudentLogs = React.useCallback(async () => {
     try {
       setLoading(true);
       
-      // Tarih aralığını hesapla
-      const { startDate, endDate } = getDateRange();
+      // Tarih aralığını hesapla - selectedDate'i direkt kullan (closure sorununu önlemek için)
+      if (!selectedDate) {
+        setLogs([]);
+        setLoading(false);
+        return;
+      }
       
+      // selectedDate local timezone'da normalize edilmiş (local tarihin yıl/ay/gün'ü)
+      // Local yıl, ay, gün değerlerini al (öğrenci hangi tarihte kaydetti ise o tarihte görünsün)
+      const selectedYear = selectedDate.getFullYear();
+      const selectedMonth = selectedDate.getMonth();
+      const selectedDay = selectedDate.getDate();
       
-      // Öğrencinin çalışma loglarını al
-      const { data, error } = await supabase
+      let startDate, endDate;
+      
+      if (viewMode === 'daily') {
+        // Günlük görünüm - Local timezone'da seçili günün başı ve sonu
+        // Öğrenci hangi tarihte kaydetti ise o tarihte görünsün
+        startDate = new Date(selectedYear, selectedMonth, selectedDay, 0, 0, 0, 0);
+        endDate = new Date(selectedYear, selectedMonth, selectedDay, 23, 59, 59, 999);
+      } else if (viewMode === 'weekly') {
+        // Haftalık görünüm - 6 gün öncesinden başlayarak (local timezone)
+        const weekStart = new Date(selectedYear, selectedMonth, selectedDay, 0, 0, 0, 0);
+        weekStart.setDate(weekStart.getDate() - 6);
+        startDate = weekStart;
+        endDate = new Date(selectedYear, selectedMonth, selectedDay, 23, 59, 59, 999);
+      } else {
+        // Aylık görünüm (local timezone)
+        startDate = new Date(selectedYear, selectedMonth, 1, 0, 0, 0, 0);
+        const lastDayOfMonth = new Date(selectedYear, selectedMonth + 1, 0);
+        endDate = new Date(selectedYear, selectedMonth, lastDayOfMonth.getDate(), 23, 59, 59, 999);
+      }
+      
+      // Rehber öğretmen kontrolü - eğer route params'da isGuidanceTeacher varsa supabaseAdmin kullan
+      const isGuidanceTeacherParam = route?.params?.isGuidanceTeacher || false;
+      const queryClient = isGuidanceTeacherParam ? supabaseAdmin : supabase;
+      
+      // Veritabanı sorgusu için UTC aralığı (geniş buffer ile)
+      // Local timezone'daki günün başı ve sonunun UTC karşılığı
+      // Örneğin: Türkiye'de 1 Kasım 00:00:00 (UTC+3) = UTC'de 31 Ekim 21:00:00
+      // Bu yüzden buffer ekleyerek geniş bir aralık kullanıyoruz
+      const queryStart = new Date(startDate);
+      queryStart.setHours(queryStart.getHours() - 12); // 12 saat öncesi buffer
+      const queryEnd = new Date(endDate);
+      queryEnd.setHours(queryEnd.getHours() + 12); // 12 saat sonrası buffer
+      
+      // Öğrencinin çalışma loglarını al - geniş tarih aralığı (client-side'da filtreleyeceğiz)
+      const { data, error } = await queryClient
         .from('study_logs')
         .select('*')
         .eq('user_id', studentId)
-        .gte('study_date', startDate.toISOString())
-        .lte('study_date', endDate.toISOString())
+        .gte('study_date', queryStart.toISOString())
+        .lte('study_date', queryEnd.toISOString())
         .order('study_date', { ascending: false });
 
-      if (error) throw error;
+      if (error) {
+        console.error('Öğrenci logları yükleme hatası:', error);
+        throw error;
+      }
 
-
-      // Client-side filtreleme
+      // Client-side filtreleme - Local timezone bazlı tarih karşılaştırması
+      // Öğrenci hangi tarihte kaydetti ise o tarihte görünsün (local timezone)
+      // selectedYear, selectedMonth, selectedDay zaten yukarıda tanımlanmış
+      
       const filteredData = (data || []).filter(log => {
-        const logDate = new Date(log.study_date);
-        const logDateOnly = logDate.toISOString().split('T')[0];
-        const startDateOnly = startDate.toISOString().split('T')[0];
-        const endDateOnly = endDate.toISOString().split('T')[0];
+        if (!log.study_date) return false;
         
-        return logDateOnly >= startDateOnly && logDateOnly <= endDateOnly;
+        const logDate = new Date(log.study_date);
+        
+        // viewMode'a göre filtreleme
+        if (viewMode === 'daily') {
+          // Günlük görünüm - Local timezone bazlı tarih karşılaştırması
+          // Log tarihinin local timezone'daki gün değerini al
+          const logYear = logDate.getFullYear();
+          const logMonth = logDate.getMonth();
+          const logDay = logDate.getDate();
+          
+          // Local timezone'da tarih karşılaştırması
+          return logYear === selectedYear && 
+                 logMonth === selectedMonth && 
+                 logDay === selectedDay;
+        } else if (viewMode === 'weekly') {
+          // Haftalık görünüm - zaman damgası bazlı aralık kontrolü
+          const logTime = logDate.getTime();
+          return logTime >= startDate.getTime() && logTime <= endDate.getTime();
+        } else {
+          // Aylık görünüm - zaman damgası bazlı aralık kontrolü
+          const logTime = logDate.getTime();
+          return logTime >= startDate.getTime() && logTime <= endDate.getTime();
+        }
       });
 
       setLogs(filteredData);
     } catch (error) {
       console.error('Error loading student logs:', error);
+      setLogs([]);
     } finally {
       setLoading(false);
     }
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [studentId, selectedDateTimestamp, viewMode, route?.params?.isGuidanceTeacher]);
 
 
   const formatDate = (dateString) => {
     const date = new Date(dateString);
-    return date.toLocaleDateString('tr-TR', {
-      day: 'numeric',
-      month: 'long',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
+    // Local timezone'da göster (öğrenci hangi tarih/saatte kaydetti ise o şekilde görünsün)
+    // Veritabanı UTC'de saklanıyor ama gösterimde local timezone kullanıyoruz
+    const year = date.getFullYear();
+    const month = date.getMonth();
+    const day = date.getDate();
+    const hours = date.getHours();
+    const minutes = date.getMinutes();
+    
+    // Türkçe ay isimleri
+    const monthNames = ['Ocak', 'Şubat', 'Mart', 'Nisan', 'Mayıs', 'Haziran',
+      'Temmuz', 'Ağustos', 'Eylül', 'Ekim', 'Kasım', 'Aralık'];
+    
+    return `${day} ${monthNames[month]} ${year} ${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
   };
 
   const formatDuration = (minutes) => {
@@ -383,6 +532,7 @@ const TeacherStudentDetailScreen = ({ route, navigation }) => {
       percentage: testData.length > 0 ? Math.round((item.total / testData.reduce((sum, t) => sum + t.total, 0)) * 100) : 0
     }));
   };
+
 
   if (loading) {
     return (
@@ -1143,7 +1293,6 @@ const createStyles = (colors) => StyleSheet.create({
          },
   logsSection: {
     padding: 16,
-    flex: 1, // ScrollView içinde düzgün çalışması için
   },
   sectionTitle: {
     fontSize: 18,

@@ -30,6 +30,7 @@ import AdminLoginScreen from '../screens/AdminLoginScreen';
 import AdminDashboardScreen from '../screens/AdminDashboardScreen';
 import AdminTeachersScreen from '../screens/AdminTeacherScreen';
 import AdminStudentsScreen from '../screens/AdminStudentsScreen';
+import { useNavigation } from '@react-navigation/native';
 
 const Tab = createBottomTabNavigator();
 
@@ -37,6 +38,7 @@ function BottomTabNavigatorContent({ isDemo }) {
   const insets = useSafeAreaInsets();
   const { isDark } = useTheme();
   const colors = isDark ? DARK_COLORS : COLORS;
+  const navigation = useNavigation();
   
   const [userType, setUserType] = useState(null); // null = henüz belirlenmedi
   const [loading, setLoading] = useState(true);
@@ -112,7 +114,8 @@ function BottomTabNavigatorContent({ isDemo }) {
           .single();
         
         if (profile) {
-          setUserType(profile.user_type || 'student');
+          const currentUserType = profile.user_type || 'student';
+          setUserType(currentUserType);
           
           // Bireysel kullanıcı kontrolü
           // Bireysel kullanıcı kontrolü: kullanıcı sadece 'Bireysel Kullanıcılar' kurumunda mı?
@@ -139,11 +142,11 @@ function BottomTabNavigatorContent({ isDemo }) {
           setIsIndividualUser(individualUser);
           
           // Eğer öğretmen ise bekleyen istekleri yükle
-          if (profile.user_type === 'teacher') {
+          if (currentUserType === 'teacher') {
             loadPendingRequestsCount();
           }
           // Eğer öğrenci ise mesaj sayısını yükle ve öğretmen bağlantısını kontrol et
-          if (profile.user_type === 'student') {
+          if (currentUserType === 'student') {
             loadUnreadMessageCount();
             await checkTeacherConnection(user.id);
           }
@@ -201,6 +204,10 @@ function BottomTabNavigatorContent({ isDemo }) {
     }
   };
   
+  // Admin ise AdminDashboard göster, normal tab navigator gösterme
+  if (userType === 'admin' && !loading) {
+    return <AdminDashboardScreen navigation={navigation} />;
+  }
 
   return (
     <Tab.Navigator

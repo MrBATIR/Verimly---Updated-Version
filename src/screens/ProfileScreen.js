@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert, ScrollView, Linking, Modal, TextInput, Clipboard, Animated, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, CommonActions } from '@react-navigation/native';
 import { Container, Button, Input, Card } from '../components';
 import { COLORS, DARK_COLORS, SIZES, SHADOWS } from '../constants/theme';
 import { supabase } from '../lib/supabase';
@@ -123,7 +123,25 @@ export default function ProfileScreen({ route, navigation }) {
       setLoading(true);
     }
     try {
-      const { data: { user: authUser } } = await supabase.auth.getUser();
+      const { data: { user: authUser }, error: authError } = await supabase.auth.getUser();
+      
+      // Session kontrolü - eğer kullanıcı yoksa veya hata varsa login'e yönlendir
+      if (authError || !authUser) {
+        console.log('Kullanıcı oturumu geçersiz, login ekranına yönlendiriliyor');
+        if (showLoading) {
+          setLoading(false);
+        }
+        // Session'ı temizle
+        await supabase.auth.signOut();
+        // Login ekranına yönlendir
+        navigation.dispatch(
+          CommonActions.reset({
+            index: 0,
+            routes: [{ name: 'Login' }],
+          })
+        );
+        return;
+      }
       
       if (authUser) {
         // Profiles tablosundan detaylı bilgileri çek
@@ -140,16 +158,65 @@ export default function ProfileScreen({ route, navigation }) {
             .eq('user_id', authUser.id)
             .single();
 
+          // Eğer user_profiles'de kayıt yoksa ve kullanıcı veritabanından silinmişse
+          // Kullanıcıyı login ekranına yönlendir
+          if (userProfileError) {
+            if (userProfileError.code === 'PGRST116' || userProfileError.message?.includes('0 rows')) {
+              console.log('Kullanıcı veritabanında bulunamadı, login ekranına yönlendiriliyor');
+              if (showLoading) {
+                setLoading(false);
+              }
+              await supabase.auth.signOut();
+              navigation.dispatch(
+                CommonActions.reset({
+                  index: 0,
+                  routes: [{ name: 'Login' }],
+                })
+              );
+              return;
+            }
+            // Diğer hatalar için devam et (kullanıcı bilgisi yoksa varsayılan değerler kullanılacak)
+          }
+
         // Öğretmenler için teachers tablosundan branş bilgisini çek
         let teacherInfo = null;
         if (userProfile && userProfile.user_type === 'teacher') {
           const { data: teacherData, error: teacherError } = await supabase
             .from('teachers')
-            .select('branch, phone, institution_id')
+            .select('name, branch, phone, institution_id')
             .eq('user_id', authUser.id)
-            .single();
+            .maybeSingle(); // single() yerine maybeSingle() kullan - kayıt yoksa hata vermez
           
-          teacherInfo = teacherData;
+          if (teacherError && teacherError.code !== 'PGRST116') {
+            // PGRST116 hatası kayıt bulunamadı demektir, bu normal olabilir
+            console.error('Öğretmen bilgisi yüklenirken hata:', teacherError);
+          }
+          
+          teacherInfo = teacherData || {};
+          
+          // user_profiles tablosundan tam ad bilgisini çek (eğer varsa ve daha tam ise)
+          const { data: userProfileData, error: userProfileDataError } = await supabase
+            .from('user_profiles')
+            .select('name')
+            .eq('user_id', authUser.id)
+            .maybeSingle();
+          
+          // Eğer user_profiles'da name varsa ve teachers.name'den daha uzunsa (tam ad içeriyorsa), onu kullan
+          if (!userProfileDataError && userProfileData?.name) {
+            const teacherName = teacherData?.name || '';
+            const profileName = userProfileData.name || '';
+            
+            // Eğer profile name daha uzunsa veya teacher name boşsa, profile name'i kullan
+            if (profileName.length > teacherName.length || !teacherName) {
+              teacherInfo.name = profileName;
+            } else if (teacherName) {
+              teacherInfo.name = teacherName;
+            }
+          } else if (teacherData?.name) {
+            teacherInfo.name = teacherData.name;
+          } else if (userProfileData?.name) {
+            teacherInfo.name = userProfileData.name;
+          }
           
           // Öğretmenin kurum bilgisini yükle (önce teachers tablosundan)
           if (teacherData?.institution_id) {
@@ -314,11 +381,36 @@ export default function ProfileScreen({ route, navigation }) {
         if (showLoading) {
           setLoading(false);
         }
+      } else {
+        // Kullanıcı yoksa login'e yönlendir
+        console.log('Kullanıcı bulunamadı, login ekranına yönlendiriliyor');
+        if (showLoading) {
+          setLoading(false);
+        }
+        await supabase.auth.signOut();
+        navigation.dispatch(
+          CommonActions.reset({
+            index: 0,
+            routes: [{ name: 'Login' }],
+          })
+        );
       }
     } catch (error) {
       console.error('Profil yükleme hatası:', error);
       if (showLoading) {
         setLoading(false);
+      }
+      // Hata durumunda da session'ı temizle ve login'e yönlendir
+      try {
+        await supabase.auth.signOut();
+        navigation.dispatch(
+          CommonActions.reset({
+            index: 0,
+            routes: [{ name: 'Login' }],
+          })
+        );
+      } catch (signOutError) {
+        console.error('Sign out hatası:', signOutError);
       }
     }
   };
@@ -447,7 +539,22 @@ export default function ProfileScreen({ route, navigation }) {
 
   const getUserProfile = async () => {
     try {
-      const { data: { user: authUser } } = await supabase.auth.getUser();
+      const { data: { user: authUser }, error: authError } = await supabase.auth.getUser();
+      
+      // Session kontrolü - eğer kullanıcı yoksa veya hata varsa login'e yönlendir
+      if (authError || !authUser) {
+        console.log('Kullanıcı oturumu geçersiz, login ekranına yönlendiriliyor');
+        // Session'ı temizle
+        await supabase.auth.signOut();
+        // Login ekranına yönlendir
+        navigation.dispatch(
+          CommonActions.reset({
+            index: 0,
+            routes: [{ name: 'Login' }],
+          })
+        );
+        return;
+      }
       
       if (authUser) {
         // Profiles tablosundan detaylı bilgileri çek
@@ -465,7 +572,21 @@ export default function ProfileScreen({ route, navigation }) {
           .single();
 
         if (userProfileError) {
-          // Eğer user_profiles'de kayıt yoksa, varsayılan olarak student olarak ekle
+          // Eğer user_profiles'de kayıt yoksa ve kullanıcı veritabanından silinmişse
+          // Kullanıcıyı login ekranına yönlendir
+          if (userProfileError.code === 'PGRST116' || userProfileError.message?.includes('0 rows')) {
+            console.log('Kullanıcı veritabanında bulunamadı, login ekranına yönlendiriliyor');
+            await supabase.auth.signOut();
+            navigation.dispatch(
+              CommonActions.reset({
+                index: 0,
+                routes: [{ name: 'Login' }],
+              })
+            );
+            return;
+          }
+          
+          // Eğer sadece user_profiles'de kayıt yoksa, varsayılan olarak student olarak ekle
           const { error: insertError } = await supabase
             .from('user_profiles')
             .insert({
@@ -477,6 +598,16 @@ export default function ProfileScreen({ route, navigation }) {
             });
           
           if (insertError) {
+            // Ekleme hatası varsa da login'e yönlendir
+            console.log('User profile oluşturulamadı, login ekranına yönlendiriliyor');
+            await supabase.auth.signOut();
+            navigation.dispatch(
+              CommonActions.reset({
+                index: 0,
+                routes: [{ name: 'Login' }],
+              })
+            );
+            return;
           }
           
           setUser(authUser);
@@ -489,7 +620,12 @@ export default function ProfileScreen({ route, navigation }) {
             .from('teachers')
             .select('branch, phone, institution_id')
             .eq('user_id', authUser.id)
-            .single();
+            .maybeSingle(); // single() yerine maybeSingle() kullan - kayıt yoksa hata vermez
+          
+          if (teacherError && teacherError.code !== 'PGRST116') {
+            // PGRST116 hatası kayıt bulunamadı demektir, bu normal olabilir
+            console.error('Öğretmen bilgisi yüklenirken hata:', teacherError);
+          }
           
           console.log('Teachers tablosu sorgusu sonucu:', teacherData, 'Error:', teacherError);
             teacherInfo = teacherData;
@@ -558,8 +694,31 @@ export default function ProfileScreen({ route, navigation }) {
           setUser(userWithType);
           setUserType(userProfile?.user_type || 'student');
         }
+      } else {
+        // Kullanıcı yoksa login'e yönlendir
+        console.log('Kullanıcı bulunamadı, login ekranına yönlendiriliyor');
+        await supabase.auth.signOut();
+        navigation.dispatch(
+          CommonActions.reset({
+            index: 0,
+            routes: [{ name: 'Login' }],
+          })
+        );
       }
     } catch (error) {
+      console.error('getUserProfile hatası:', error);
+      // Hata durumunda da session'ı temizle ve login'e yönlendir
+      try {
+        await supabase.auth.signOut();
+        navigation.dispatch(
+          CommonActions.reset({
+            index: 0,
+            routes: [{ name: 'Login' }],
+          })
+        );
+      } catch (signOutError) {
+        console.error('Sign out hatası:', signOutError);
+      }
     }
   };
 

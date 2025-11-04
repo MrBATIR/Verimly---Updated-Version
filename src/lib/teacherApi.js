@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { supabase, supabaseAdmin } from './supabase';
 
 // ========================================
 // ÖĞRETMEN-ÖĞRENCİ BAĞLANTI API FONKSİYONLARI
@@ -769,18 +769,34 @@ export const createStudentPlan = async (studentId, title, description, planDate,
       throw new Error('Öğretmen bulunamadı');
     }
 
+    // Rehber öğretmen kontrolü
+    let isGuidanceTeacher = false;
+    const { data: institutionData, error: institutionError } = await supabase
+      .from('institutions')
+      .select('id')
+      .eq('guidance_teacher_id', teacher.id)
+      .eq('is_active', true)
+      .maybeSingle();
+
+    if (!institutionError && institutionData) {
+      isGuidanceTeacher = true;
+    }
+
+    // Rehber öğretmen ise supabaseAdmin kullan
+    const queryClient = isGuidanceTeacher ? supabaseAdmin : supabase;
+
     // Plan oluştur
     let data, error;
     
     if (planType === 'daily') {
-      const result = await supabase
+      const result = await queryClient
         .from('student_daily_plans')
         .insert({
           student_id: studentId,
-          teacher_id: teacher.id,
+          teacher_id: teacher.id, // teacher_id ile öğrenci tarafında rehber öğretmen kontrolü yapılabilir
           title: title,
           description: description,
-          plan_date: planDate.toISOString().split('T')[0], // YYYY-MM-DD formatında
+          plan_date: planDate instanceof Date ? planDate.toISOString().split('T')[0] : planDate, // YYYY-MM-DD formatında
           is_completed: false
         })
         .select()
@@ -789,16 +805,17 @@ export const createStudentPlan = async (studentId, title, description, planDate,
       error = result.error;
     } else {
       // Haftalık plan için haftanın başlangıç tarihini hesapla
-      const weekStart = new Date(planDate);
+      const planDateObj = planDate instanceof Date ? planDate : new Date(planDate);
+      const weekStart = new Date(planDateObj);
       const day = weekStart.getDay();
       const diff = weekStart.getDate() - day + (day === 0 ? -6 : 1); // Pazartesi
       weekStart.setDate(diff);
       
-      const result = await supabase
+      const result = await queryClient
         .from('student_weekly_plans')
         .insert({
           student_id: studentId,
-          teacher_id: teacher.id,
+          teacher_id: teacher.id, // teacher_id ile öğrenci tarafında rehber öğretmen kontrolü yapılabilir
           title: title,
           description: description,
           week_start_date: weekStart.toISOString().split('T')[0], // YYYY-MM-DD formatında

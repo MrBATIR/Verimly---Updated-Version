@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal, Alert } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal, Alert, TextInput } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import { useTheme } from '../contexts/ThemeContext';
@@ -7,7 +7,7 @@ import { DARK_COLORS, COLORS } from '../constants/theme';
 import { SIZES, SHADOWS } from '../constants/theme';
 import Container from '../components/Container';
 import Card from '../components/Card';
-import { supabase } from '../lib/supabase';
+import { supabase, supabaseAdmin } from '../lib/supabase';
 
 const TeacherAddScreen = ({ navigation }) => {
   const { isDark } = useTheme();
@@ -17,6 +17,8 @@ const TeacherAddScreen = ({ navigation }) => {
   const [students, setStudents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [studentAvatars, setStudentAvatars] = useState({});
+  const [isGuidanceTeacher, setIsGuidanceTeacher] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
   
   // Öğrenci detay modal state'leri
   const [showStudentDetailModal, setShowStudentDetailModal] = useState(false);
@@ -58,38 +60,90 @@ const TeacherAddScreen = ({ navigation }) => {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
-      // Öğretmenin öğrencilerini getir
-      const teacherResult = await supabase
+      // Öğretmen ID'sini al
+      const { data: teacherData, error: teacherError } = await supabase
         .from('teachers')
         .select('id')
         .eq('user_id', user.id)
         .single();
-      
-      const { data: students, error: studentsError } = await supabase
-        .from('student_teachers')
-        .select(`
-          id,
-          student_id
-        `)
-        .eq('teacher_id', teacherResult.data?.id)
-        .eq('is_active', true)
-        .in('approval_status', ['approved', 'rejected']); // Onaylanmış ve reddedilen kesme istekleri
 
-      if (studentsError) {
-        console.error('Öğrenciler yüklenirken hata:', studentsError);
+      if (teacherError || !teacherData) {
+        console.error('Öğretmen bulunamadı:', teacherError);
+        if (showLoading) {
+          setLoading(false);
+        }
         return;
       }
 
-      const connectedStudentIds = students?.map(student => student.student_id) || [];
+      let studentIds = [];
+      let isGuidanceTeacherLocal = false;
+
+      // Rehber öğretmen kontrolü - Kurumunun rehber öğretmeni mi?
+      const { data: institutionData, error: institutionError } = await supabase
+        .from('institutions')
+        .select('id, name')
+        .eq('guidance_teacher_id', teacherData.id)
+        .eq('is_active', true)
+        .maybeSingle();
+
+      if (!institutionError && institutionData) {
+        isGuidanceTeacherLocal = true;
+        setIsGuidanceTeacher(true);
+        
+        // Rehber öğretmen - Kurumundaki tüm öğrencileri göster
+        const { data: institutionMemberships, error: membershipError } = await supabaseAdmin
+          .from('institution_memberships')
+          .select('user_id')
+          .eq('institution_id', institutionData.id)
+          .eq('role', 'student')
+          .eq('is_active', true);
+
+        if (!membershipError && institutionMemberships?.length > 0) {
+          studentIds = institutionMemberships.map(m => m.user_id).filter(Boolean);
+        }
+      } else {
+        setIsGuidanceTeacher(false);
+        // Normal öğretmen - Bağlı öğrencileri al
+        const { data: students, error: studentsError } = await supabase
+          .from('student_teachers')
+          .select('student_id')
+          .eq('teacher_id', teacherData.id)
+          .eq('is_active', true)
+          .in('approval_status', ['approved', 'rejected']); // Onaylanmış ve reddedilen kesme istekleri
+
+        if (studentsError) {
+          console.error('Öğrenciler yüklenirken hata:', studentsError);
+          if (showLoading) {
+            setLoading(false);
+          }
+          return;
+        }
+
+        studentIds = students?.map(student => student.student_id) || [];
+      }
+
+      if (studentIds.length === 0) {
+        setStudents([]);
+        setStudentAvatars({});
+        if (showLoading) {
+          setLoading(false);
+        }
+        return;
+      }
       
       // Öğrenci profil verilerini al
-      const { data: studentProfiles, error: profileError } = await supabase
+      const queryClient = isGuidanceTeacherLocal ? supabaseAdmin : supabase;
+      
+      const { data: studentProfiles, error: profileError } = await queryClient
         .from('user_profiles')
         .select('user_id, selected_avatar')
-        .in('user_id', connectedStudentIds);
+        .in('user_id', studentIds);
 
       if (profileError) {
         console.error('Öğrenci profilleri yüklenirken hata:', profileError);
+        if (showLoading) {
+          setLoading(false);
+        }
         return;
       }
 
@@ -104,20 +158,20 @@ const TeacherAddScreen = ({ navigation }) => {
       // Öğrenci verilerini formatla - gerçek bilgileri kullan
       const formattedStudents = [];
       
-      for (const studentId of connectedStudentIds) {
+      for (const studentId of studentIds) {
         // user_profiles tablosundan gerçek bilgileri çek
-        const { data: profile, error: profileError } = await supabase
+        const { data: profile, error: profileError } = await queryClient
           .from('user_profiles')
           .select('user_id, name, email')
           .eq('user_id', studentId)
           .single();
         
         // students tablosundan sınıf bilgisini çek
-        const { data: studentData, error: studentError } = await supabase
+        const { data: studentData, error: studentError } = await queryClient
           .from('students')
           .select('grade')
           .eq('email', profile?.email || '')
-          .single();
+          .maybeSingle();
         
         if (!profileError && profile) {
           formattedStudents.push({
@@ -136,6 +190,13 @@ const TeacherAddScreen = ({ navigation }) => {
           });
         }
       }
+
+      // Alfabetik sıralama (isme göre)
+      formattedStudents.sort((a, b) => {
+        const nameA = (a.name || '').toLowerCase();
+        const nameB = (b.name || '').toLowerCase();
+        return nameA.localeCompare(nameB, 'tr');
+      });
 
       setStudents(formattedStudents);
       if (showLoading) {
@@ -157,14 +218,17 @@ const TeacherAddScreen = ({ navigation }) => {
     setShowStudentDetailModal(true);
 
     try {
+      // Rehber öğretmen kontrolü için queryClient kullan
+      const queryClient = isGuidanceTeacher ? supabaseAdmin : supabase;
+      
       // Students tablosundan detaylı bilgileri çek
-      const { data: studentData, error } = await supabase
+      const { data: studentData, error } = await queryClient
         .from('students')
         .select('*')
         .eq('email', student.email)
-        .single();
+        .maybeSingle();
 
-      if (error) {
+      if (error || !studentData) {
         console.error('Öğrenci detayları yüklenirken hata:', error);
         // Hata durumunda da modal'ı göster ama sadece temel bilgilerle
         setStudentDetail({
@@ -238,13 +302,44 @@ const TeacherAddScreen = ({ navigation }) => {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Mevcut Öğrenciler</Text>
           
+          {/* Arama Input */}
+          {students.length > 0 && (
+            <View style={styles.searchContainer}>
+              <Ionicons name="search" size={20} color={colors.textSecondary} style={styles.searchIcon} />
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Öğrenci adı ile ara..."
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                placeholderTextColor={colors.textSecondary}
+              />
+              {searchQuery.length > 0 && (
+                <TouchableOpacity
+                  style={styles.clearSearchButton}
+                  onPress={() => setSearchQuery('')}
+                >
+                  <Ionicons name="close-circle" size={20} color={colors.textSecondary} />
+                </TouchableOpacity>
+              )}
+            </View>
+          )}
+          
           {loading ? (
             <View style={styles.loadingContainer}>
               <Text style={styles.loadingText}>Yükleniyor...</Text>
             </View>
           ) : students.length > 0 ? (
             <View style={styles.studentsList}>
-              {students.map((student) => (
+              {students
+                .filter(student => {
+                  if (!searchQuery.trim()) return true;
+                  const query = searchQuery.toLowerCase();
+                  return (
+                    student.name?.toLowerCase().includes(query) ||
+                    student.email?.toLowerCase().includes(query)
+                  );
+                })
+                .map((student) => (
                 <TouchableOpacity 
                   key={student.id} 
                   onPress={() => loadStudentDetail(student)}
@@ -280,7 +375,29 @@ const TeacherAddScreen = ({ navigation }) => {
             <View style={styles.emptyState}>
               <Ionicons name="people-outline" size={48} color={colors.textLight} />
               <Text style={styles.emptyText}>Henüz öğrenci yok</Text>
-              <Text style={styles.emptySubtext}>Öğrenciler öğretmen kodunuzu kullanarak bağlanacak</Text>
+              <Text style={styles.emptySubtext}>
+                {isGuidanceTeacher 
+                  ? 'Kurumda öğrenci bulunmamaktadır'
+                  : 'Öğrenciler öğretmen kodunuzu kullanarak bağlanacak'
+                }
+              </Text>
+            </View>
+          )}
+          
+          {/* Arama sonucu bulunamadı */}
+          {students.length > 0 && 
+           students.filter(student => {
+             if (!searchQuery.trim()) return false;
+             const query = searchQuery.toLowerCase();
+             return (
+               student.name?.toLowerCase().includes(query) ||
+               student.email?.toLowerCase().includes(query)
+             );
+           }).length === 0 && searchQuery.trim().length > 0 && (
+            <View style={styles.emptySearchContainer}>
+              <Ionicons name="search-outline" size={48} color={colors.textSecondary} />
+              <Text style={styles.emptySearchText}>Arama sonucu bulunamadı</Text>
+              <Text style={styles.emptySearchSubtext}>"{searchQuery}" için öğrenci bulunamadı</Text>
             </View>
           )}
         </View>
@@ -563,6 +680,48 @@ const createStyles = (colors) => StyleSheet.create({
     color: colors.textPrimary,
     marginBottom: 12,
     marginTop: 8,
+  },
+  searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderRadius: SIZES.radius,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  searchIcon: {
+    marginRight: 8,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: SIZES.body,
+    color: colors.textPrimary,
+    paddingVertical: 4,
+  },
+  clearSearchButton: {
+    marginLeft: 8,
+    padding: 4,
+  },
+  emptySearchContainer: {
+    padding: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 20,
+  },
+  emptySearchText: {
+    fontSize: SIZES.body,
+    fontWeight: '600',
+    color: colors.textSecondary,
+    marginTop: 12,
+  },
+  emptySearchSubtext: {
+    fontSize: SIZES.small,
+    color: colors.textSecondary,
+    marginTop: 4,
+    textAlign: 'center',
   },
   studentsList: {
     gap: 0,

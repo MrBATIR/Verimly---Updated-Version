@@ -11,6 +11,7 @@ import {
   ScrollView,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
+import { Ionicons } from '@expo/vector-icons';
 import { Container, Card, AdBanner } from '../components';
 import { getMessages, markMessageAsRead, markAllMessagesAsRead } from '../lib/messageApi';
 import { supabase } from '../lib/supabase';
@@ -128,7 +129,7 @@ const StudentMessageScreen = ({ route }) => {
     try {
       const { data: teachersData, error: teachersError } = await supabase
         .from('teachers')
-        .select('user_id, name, email')
+        .select('id, user_id, name, email')
         .in('user_id', senderIds);
 
       if (teachersError || !teachersData || teachersData.length === 0) {
@@ -146,12 +147,14 @@ const StudentMessageScreen = ({ route }) => {
           if (!profile.name || profile.name.trim() === '' || profile.name.startsWith('Kullanıcı')) {
             teacherMap[profile.user_id] = {
               name: `Öğretmen ${profile.user_id.substring(0, 8)}`,
-              email: profile.email || ''
+              email: profile.email || '',
+              isGuidanceTeacher: false
             };
           } else {
             teacherMap[profile.user_id] = {
               name: profile.name,
-              email: profile.email || ''
+              email: profile.email || '',
+              isGuidanceTeacher: false
             };
           }
         });
@@ -159,14 +162,25 @@ const StudentMessageScreen = ({ route }) => {
         return;
       }
 
+      // Her öğretmen için rehber öğretmen kontrolü yap
       const teacherMap = {};
-      teachersData?.forEach(teacher => {
+      await Promise.all(teachersData.map(async (teacher) => {
         const fullName = teacher.name || 'Bilinmeyen Öğretmen';
+        
+        // Rehber öğretmen kontrolü
+        const { data: institutionData } = await supabase
+          .from('institutions')
+          .select('id')
+          .eq('guidance_teacher_id', teacher.id)
+          .eq('is_active', true)
+          .maybeSingle();
+        
         teacherMap[teacher.user_id] = {
           name: fullName,
-          email: teacher.email || ''
+          email: teacher.email || '',
+          isGuidanceTeacher: !!institutionData
         };
-      });
+      }));
 
       setTeachers(teacherMap);
     } catch (error) {
@@ -175,7 +189,8 @@ const StudentMessageScreen = ({ route }) => {
       senderIds.forEach(id => {
         teacherMap[id] = {
           name: `Öğretmen ${id.substring(0, 8)}`,
-          email: ''
+          email: '',
+          isGuidanceTeacher: false
         };
       });
       setTeachers(teacherMap);
@@ -247,7 +262,14 @@ const StudentMessageScreen = ({ route }) => {
             </View>
             <View style={styles.teacherMessageInfo}>
               <View style={styles.teacherMessageTitleRow}>
-                <Text style={styles.teacherMessageTitle}>{teacherName}</Text>
+                <Text style={styles.teacherMessageTitle}>
+                  {teacherInfo?.isGuidanceTeacher ? `${teacherName} (Rehber Öğretmen)` : teacherName}
+                </Text>
+                {teacherInfo?.isGuidanceTeacher && (
+                  <View style={styles.guidanceTeacherBadge}>
+                    <Ionicons name="shield-checkmark" size={12} color="#fff" />
+                  </View>
+                )}
                 {group.hasUnread && (
                   <View style={styles.teacherMessageNewBadge}>
                     <Text style={styles.teacherMessageNewText}>YENİ</Text>
@@ -341,8 +363,13 @@ const StudentMessageScreen = ({ route }) => {
             <View style={styles.testMessageInfo}>
               <View style={styles.testMessageHeader}>
                 <Text style={styles.testTeacherName}>
-                  {senderName}
+                  {teacherInfo?.isGuidanceTeacher ? `${senderName} (Rehber Öğretmen)` : senderName}
                 </Text>
+                {teacherInfo?.isGuidanceTeacher && (
+                  <View style={styles.guidanceTeacherBadge}>
+                    <Ionicons name="shield-checkmark" size={12} color="#fff" />
+                  </View>
+                )}
                 {!item.is_read && (
                   <View style={styles.testNewBadge}>
                     <Text style={styles.testNewText}>YENİ</Text>
@@ -684,6 +711,15 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     overflow: 'hidden',
     height: 60,
+  },
+  guidanceTeacherBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#9C27B0',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    marginLeft: 8,
   },
 });
 

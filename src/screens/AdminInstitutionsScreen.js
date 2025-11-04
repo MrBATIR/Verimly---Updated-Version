@@ -8,7 +8,9 @@ import {
   Alert,
   ActivityIndicator,
   Modal,
+  Platform,
 } from 'react-native';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../contexts/ThemeContext';
 import { DARK_COLORS, COLORS } from '../constants/theme';
@@ -17,7 +19,7 @@ import Container from '../components/Container';
 import Card from '../components/Card';
 import Input from '../components/Input';
 import Button from '../components/Button';
-import { supabase } from '../lib/supabase';
+import { supabase, supabaseAdmin } from '../lib/supabase';
 
 const AdminInstitutionsScreen = ({ navigation }) => {
   const { isDark } = useTheme();
@@ -52,20 +54,103 @@ const AdminInstitutionsScreen = ({ navigation }) => {
     payment_status: 'pending',
     notes: '',
   });
+  
+  // Tarih seçici state'leri
+  const [showStartDatePicker, setShowStartDatePicker] = useState(false);
+  const [showEndDatePicker, setShowEndDatePicker] = useState(false);
+  const [startDate, setStartDate] = useState(new Date());
+  const [endDate, setEndDate] = useState(new Date());
+
+  // Sözleşme bitiş tarihi kontrolü ve otomatik pasif etme
+  const checkContractExpiry = async (institutionId = null) => {
+    try {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const todayStr = today.toISOString().split('T')[0];
+      
+      let query = supabaseAdmin
+        .from('institutions')
+        .select('id, name, contract_end_date, is_active')
+        .not('contract_end_date', 'is', null)
+        .lt('contract_end_date', todayStr);
+
+      // Eğer belirli bir kurum kontrol ediliyorsa
+      if (institutionId) {
+        query = query.eq('id', institutionId);
+      } else {
+        // Aktif olanları kontrol et
+        query = query.eq('is_active', true);
+      }
+
+      const { data: expiredInstitutions, error } = await query;
+
+      if (error) {
+        console.error('Sözleşme kontrolü hatası:', error);
+        return;
+      }
+
+      if (expiredInstitutions && expiredInstitutions.length > 0) {
+        // Süresi dolmuş kurumları pasif et
+        for (const institution of expiredInstitutions) {
+          await supabaseAdmin
+            .from('institutions')
+            .update({
+              is_active: false,
+              is_premium: false,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', institution.id);
+
+          // Üyelerin erişimini de kapat
+          await supabaseAdmin
+            .from('institution_memberships')
+            .update({
+              is_active: false,
+              updated_at: new Date().toISOString()
+            })
+            .eq('institution_id', institution.id);
+
+          console.log(`Kurum pasif edildi: ${institution.name} (Sözleşme: ${institution.contract_end_date})`);
+        }
+      }
+    } catch (error) {
+      console.error('Sözleşme kontrolü genel hatası:', error);
+    }
+  };
+
+  // Sayfa yüklendiğinde kurumları yükle ve sözleşme kontrolü yap
+  useEffect(() => {
+    loadInstitutions();
+    // Sayfa yüklendiğinde tüm kurumları kontrol et
+    checkContractExpiry();
+  }, []);
+
+  // Her 5 dakikada bir sözleşme kontrolü yap (opsiyonel)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      checkContractExpiry();
+    }, 5 * 60 * 1000); // 5 dakika
+
+    return () => clearInterval(interval);
+  }, []);
 
   const loadInstitutions = async () => {
     setLoading(true);
     try {
-      const result = await AdSystem.getAllInstitutions();
-      if (result.success) {
-        setInstitutions(result.data);
-        setInstitutionsLoaded(true);
-      } else {
-        Alert.alert('Hata', 'Kurumlar yüklenirken bir hata oluştu: ' + result.error);
+      const { data: institutionsData, error } = await supabaseAdmin
+        .from('institutions')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        throw error;
       }
+
+      setInstitutions(institutionsData || []);
+      setInstitutionsLoaded(true);
     } catch (error) {
       console.error('Kurumlar yükleme hatası:', error);
-      Alert.alert('Hata', 'Kurumlar yüklenirken bir hata oluştu.');
+      Alert.alert('Hata', 'Kurumlar yüklenirken bir hata oluştu: ' + error.message);
     } finally {
       setLoading(false);
     }
@@ -76,8 +161,9 @@ const AdminInstitutionsScreen = ({ navigation }) => {
 
     setSaving(true);
     try {
-      // Önce kurum oluştur
-      const { data: institutionData, error: institutionError } = await supabase
+      // Önce kurum oluştur (admin client ile RLS'i bypass ediyoruz)
+      // Eski sistemde admin_username ve admin_password hem institutions hem de institution_admin_credentials tablosuna kaydediliyordu
+      const { data: institutionData, error: institutionError } = await supabaseAdmin
         .from('institutions')
         .insert({
           name: formData.name,
@@ -90,20 +176,32 @@ const AdminInstitutionsScreen = ({ navigation }) => {
           auto_renewal: false,
           renewal_type: 'manual',
           payment_status: 'pending',
+          admin_username: formData.admin_username,
+          admin_password: formData.admin_password, // Plain text - güvenlik için bcrypt ile hash'lenmeli
         })
         .select()
         .single();
 
       if (institutionError) throw institutionError;
 
-      // Kurum admin giriş bilgilerini oluştur
-      const credentialsResult = await AdSystem.createInstitutionAdminCredentials(
-        institutionData.id,
-        formData.admin_username,
-        formData.admin_password
-      );
+      // Kurum admin giriş bilgilerini institution_admin_credentials tablosuna da kaydet
+      try {
+        const { data: credentialsData, error: credentialsError } = await supabaseAdmin
+          .from('institution_admin_credentials')
+          .insert({
+            institution_id: institutionData.id,
+            admin_username: formData.admin_username,
+            admin_password: formData.admin_password, // Plain text - güvenlik için bcrypt ile hash'lenmeli
+            is_active: true
+          })
+          .select()
+          .single();
 
-      if (credentialsResult.success) {
+        if (credentialsError) {
+          // Eğer tablo yoksa veya hata varsa, sadece uyarı ver (zaten institutions tablosuna kaydedildi)
+          console.warn('Admin credentials tablosuna kayıt hatası:', credentialsError);
+        }
+
         setGeneratedCredentials({
           institutionName: formData.name,
           adminUsername: formData.admin_username,
@@ -124,8 +222,12 @@ const AdminInstitutionsScreen = ({ navigation }) => {
         setShowAddForm(false);
         setShowCredentials(true);
         loadInstitutions(); // Listeyi yenile
-      } else {
-        Alert.alert('Hata', 'Kurum admin giriş bilgileri oluşturulamadı: ' + credentialsResult.error);
+      } catch (credentialsErr) {
+        // Admin credentials eklenemedi ama kurum oluşturuldu
+        console.error('Admin credentials oluşturma hatası:', credentialsErr);
+        Alert.alert('Uyarı', 'Kurum oluşturuldu ancak admin giriş bilgileri kaydedilemedi. Manuel olarak ekleyebilirsiniz.');
+        setShowAddForm(false);
+        loadInstitutions();
       }
     } catch (error) {
       console.error('Kurum ekleme hatası:', error);
@@ -168,21 +270,20 @@ const AdminInstitutionsScreen = ({ navigation }) => {
           text: 'Evet',
           onPress: async () => {
             try {
-              const result = await AdSystem.setInstitutionStatus(
-                institution.id,
-                newStatus,
-                newStatus ? 'Kurum aktif edildi' : 'Kurum pasif edildi'
-              );
+              const { error } = await supabaseAdmin
+                .from('institutions')
+                .update({ is_active: newStatus })
+                .eq('id', institution.id);
 
-              if (result.success) {
-                Alert.alert('Başarılı', `Kurum ${action} edildi.`);
-                loadInstitutions(); // Listeyi yenile
-              } else {
-                Alert.alert('Hata', 'Kurum durumu değiştirilemedi: ' + result.error);
+              if (error) {
+                throw error;
               }
+
+              Alert.alert('Başarılı', `Kurum ${action} edildi.`);
+              loadInstitutions(); // Listeyi yenile
             } catch (error) {
               console.error('Kurum durumu değiştirme hatası:', error);
-              Alert.alert('Hata', 'Kurum durumu değiştirilemedi.');
+              Alert.alert('Hata', 'Kurum durumu değiştirilemedi: ' + error.message);
             }
           },
         },
@@ -192,6 +293,18 @@ const AdminInstitutionsScreen = ({ navigation }) => {
 
   const updateContract = async (institution) => {
     setSelectedInstitution(institution);
+    
+    // Tarihleri Date objesine çevir
+    const startDateValue = institution.contract_start_date 
+      ? new Date(institution.contract_start_date) 
+      : new Date();
+    const endDateValue = institution.contract_end_date 
+      ? new Date(institution.contract_end_date) 
+      : new Date();
+    
+    setStartDate(startDateValue);
+    setEndDate(endDateValue);
+    
     setContractData({
       contract_start_date: institution.contract_start_date || '',
       contract_end_date: institution.contract_end_date || '',
@@ -200,29 +313,307 @@ const AdminInstitutionsScreen = ({ navigation }) => {
     });
     setShowContractModal(true);
   };
+  
+  // Tarih formatını YYYY-MM-DD formatına çevir
+  const formatDateForDB = (date) => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+  
+  // Tarih değişiklik handler'ları
+  const handleStartDateChange = async (event, selectedDate) => {
+    if (Platform.OS === 'android') {
+      setShowStartDatePicker(false);
+    }
+    if (selectedDate && selectedInstitution) {
+      setStartDate(selectedDate);
+      const formattedDate = formatDateForDB(selectedDate);
+      setContractData({ 
+        ...contractData, 
+        contract_start_date: formattedDate 
+      });
+
+      // Tarih kontrolleri
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const selectedDateOnly = new Date(selectedDate);
+      selectedDateOnly.setHours(0, 0, 0, 0);
+      
+      // Bitiş tarihini kontrol et
+      const endDateOnly = contractData.contract_end_date 
+        ? new Date(contractData.contract_end_date)
+        : null;
+
+      // Başlangıç tarihi gelecekte ise -> pasif et
+      if (selectedDateOnly > today) {
+        await supabaseAdmin
+          .from('institutions')
+          .update({
+            is_active: false,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', selectedInstitution.id);
+
+        await supabaseAdmin
+          .from('institution_memberships')
+          .update({
+            is_active: false,
+            updated_at: new Date().toISOString()
+          })
+          .eq('institution_id', selectedInstitution.id);
+
+        Alert.alert(
+          'Bilgi', 
+          `Sözleşme başlangıç tarihi gelecekte. "${selectedInstitution.name}" kurumu sözleşme başlangıcına kadar pasif kalacak.`
+        );
+      }
+      // Başlangıç tarihi geçmiş/bugün VE bitiş tarihi gelecekte/bugün ise -> aktif et (eğer pasif ise)
+      else if (selectedDateOnly <= today && endDateOnly && endDateOnly >= today) {
+        if (!selectedInstitution.is_active) {
+          await supabaseAdmin
+            .from('institutions')
+            .update({
+              is_active: true,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', selectedInstitution.id);
+
+          await supabaseAdmin
+            .from('institution_memberships')
+            .update({
+              is_active: true,
+              updated_at: new Date().toISOString()
+            })
+            .eq('institution_id', selectedInstitution.id);
+
+          Alert.alert(
+            'Bilgi', 
+            `Sözleşme başlangıç tarihi geçmiş/bugün ve bitiş tarihi gelecekte. "${selectedInstitution.name}" kurumu otomatik olarak aktif edildi.`
+          );
+          
+          // State'i güncelle
+          setSelectedInstitution({
+            ...selectedInstitution,
+            is_active: true
+          });
+        }
+      }
+      // Başlangıç tarihi geçmiş/bugün ama bitiş tarihi yok veya geçmiş ise -> pasif et
+      else if (selectedDateOnly <= today && (!endDateOnly || endDateOnly < today)) {
+        await supabaseAdmin
+          .from('institutions')
+          .update({
+            is_active: false,
+            is_premium: false,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', selectedInstitution.id);
+
+        await supabaseAdmin
+          .from('institution_memberships')
+          .update({
+            is_active: false,
+            updated_at: new Date().toISOString()
+          })
+          .eq('institution_id', selectedInstitution.id);
+
+        Alert.alert(
+          'Bilgi', 
+          `Sözleşme bitiş tarihi geçmiş veya belirlenmemiş. "${selectedInstitution.name}" kurumu pasif edildi.`
+        );
+      }
+    }
+    if (Platform.OS === 'ios') {
+      // iOS'ta modal içinde kalır
+    }
+  };
+  
+  const handleEndDateChange = async (event, selectedDate) => {
+    if (Platform.OS === 'android') {
+      setShowEndDatePicker(false);
+    }
+    if (selectedDate && selectedInstitution) {
+      setEndDate(selectedDate);
+      const formattedDate = formatDateForDB(selectedDate);
+      setContractData({ 
+        ...contractData, 
+        contract_end_date: formattedDate 
+      });
+
+      // Tarih kontrolleri
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const selectedDateOnly = new Date(selectedDate);
+      selectedDateOnly.setHours(0, 0, 0, 0);
+      
+      // Başlangıç tarihini kontrol et
+      const startDateOnly = contractData.contract_start_date 
+        ? new Date(contractData.contract_start_date)
+        : new Date(2000, 0, 1); // Varsayılan eski tarih
+      startDateOnly.setHours(0, 0, 0, 0);
+
+      // Bitiş tarihi geçmiş ise -> pasif et
+      if (selectedDateOnly < today) {
+        await supabaseAdmin
+          .from('institutions')
+          .update({
+            is_active: false,
+            is_premium: false,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', selectedInstitution.id);
+
+        await supabaseAdmin
+          .from('institution_memberships')
+          .update({
+            is_active: false,
+            updated_at: new Date().toISOString()
+          })
+          .eq('institution_id', selectedInstitution.id);
+
+        Alert.alert(
+          'Bilgi', 
+          `Sözleşme bitiş tarihi geçmiş bir tarih seçildi. "${selectedInstitution.name}" kurumu otomatik olarak pasif edildi ve üyelerin erişimi kapatıldı.`
+        );
+      } 
+      // Bitiş tarihi gelecekte VE başlangıç tarihi geçmiş/bugün ise -> aktif et (eğer pasif ise)
+      else if (selectedDateOnly >= today && startDateOnly <= today) {
+        // Sadece pasif durumdaysa aktif et
+        if (!selectedInstitution.is_active) {
+          await supabaseAdmin
+            .from('institutions')
+            .update({
+              is_active: true,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', selectedInstitution.id);
+
+          await supabaseAdmin
+            .from('institution_memberships')
+            .update({
+              is_active: true,
+              updated_at: new Date().toISOString()
+            })
+            .eq('institution_id', selectedInstitution.id);
+
+          Alert.alert(
+            'Bilgi', 
+            `Sözleşme bitiş tarihi gelecekte. "${selectedInstitution.name}" kurumu otomatik olarak aktif edildi.`
+          );
+          
+          // State'i güncelle
+          setSelectedInstitution({
+            ...selectedInstitution,
+            is_active: true
+          });
+        }
+      }
+      // Başlangıç tarihi gelecekte ise -> pasif et
+      else if (startDateOnly > today) {
+        await supabaseAdmin
+          .from('institutions')
+          .update({
+            is_active: false,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', selectedInstitution.id);
+
+        Alert.alert(
+          'Bilgi', 
+          `Sözleşme başlangıç tarihi gelecekte. "${selectedInstitution.name}" kurumu sözleşme başlangıcına kadar pasif kalacak.`
+        );
+      }
+    }
+    if (Platform.OS === 'ios') {
+      // iOS'ta modal içinde kalır
+    }
+  };
 
   const handleContractUpdate = async () => {
     if (!selectedInstitution) return;
 
     setSaving(true);
     try {
-      const result = await AdSystem.updateInstitutionContract(
-        selectedInstitution.id,
-        contractData.contract_start_date || null,
-        contractData.contract_end_date || null,
-        contractData.payment_status
-      );
+      const updateData = {
+        payment_status: contractData.payment_status,
+      };
 
-      if (result.success) {
-        Alert.alert('Başarılı', 'Sözleşme bilgileri güncellendi.');
-        setShowContractModal(false);
-        loadInstitutions(); // Listeyi yenile
-      } else {
-        Alert.alert('Hata', 'Sözleşme güncellenemedi: ' + result.error);
+      // Tarihler varsa ekle
+      if (contractData.contract_start_date) {
+        updateData.contract_start_date = contractData.contract_start_date;
       }
+      if (contractData.contract_end_date) {
+        updateData.contract_end_date = contractData.contract_end_date;
+      }
+
+      // Notes için ayrı bir alan varsa eklenebilir (şimdilik institutions tablosunda notes yoksa göz ardı edilir)
+      if (contractData.notes) {
+        updateData.notes = contractData.notes;
+      }
+
+      const { error } = await supabaseAdmin
+        .from('institutions')
+        .update(updateData)
+        .eq('id', selectedInstitution.id);
+
+      if (error) {
+        throw error;
+      }
+
+      // Güncelleme sonrası kurum durumunu kontrol et
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      
+      const startDateCheck = updateData.contract_start_date 
+        ? new Date(updateData.contract_start_date)
+        : new Date(2000, 0, 1);
+      startDateCheck.setHours(0, 0, 0, 0);
+      
+      const endDateCheck = updateData.contract_end_date 
+        ? new Date(updateData.contract_end_date)
+        : null;
+      if (endDateCheck) {
+        endDateCheck.setHours(0, 0, 0, 0);
+      }
+
+      // Sözleşme bitiş tarihi kontrolü - güncellenen kurumu kontrol et
+      await checkContractExpiry(selectedInstitution.id);
+      
+      // Eğer sözleşme geçerli ise (başlangıç <= bugün <= bitiş) ve kurum pasif ise, aktif et
+      if (startDateCheck <= today && endDateCheck && endDateCheck >= today) {
+        const { data: institutionCheck } = await supabaseAdmin
+          .from('institutions')
+          .select('is_active')
+          .eq('id', selectedInstitution.id)
+          .single();
+          
+        if (institutionCheck && !institutionCheck.is_active) {
+          await supabaseAdmin
+            .from('institutions')
+            .update({
+              is_active: true,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', selectedInstitution.id);
+
+          await supabaseAdmin
+            .from('institution_memberships')
+            .update({
+              is_active: true,
+              updated_at: new Date().toISOString()
+            })
+            .eq('institution_id', selectedInstitution.id);
+        }
+      }
+
+      Alert.alert('Başarılı', 'Sözleşme bilgileri güncellendi.');
+      setShowContractModal(false);
+      loadInstitutions(); // Listeyi yenile
     } catch (error) {
       console.error('Sözleşme güncelleme hatası:', error);
-      Alert.alert('Hata', 'Sözleşme güncellenemedi.');
+      Alert.alert('Hata', 'Sözleşme güncellenemedi: ' + error.message);
     } finally {
       setSaving(false);
     }
@@ -597,19 +988,61 @@ const AdminInstitutionsScreen = ({ navigation }) => {
                   {selectedInstitution?.name}
                 </Text>
 
-                <Input
-                  label="Sözleşme Başlangıç Tarihi"
-                  value={contractData.contract_start_date}
-                  onChangeText={(text) => setContractData({ ...contractData, contract_start_date: text })}
-                  placeholder="YYYY-MM-DD"
-                />
+                <View style={styles.dateInputContainer}>
+                  <Text style={[styles.inputLabel, { color: colors.textPrimary }]}>
+                    Sözleşme Başlangıç Tarihi
+                  </Text>
+                  <TouchableOpacity
+                    style={[styles.dateInput, { borderColor: colors.border, backgroundColor: colors.background }]}
+                    onPress={() => setShowStartDatePicker(true)}
+                  >
+                    <Ionicons name="calendar-outline" size={20} color={colors.primary} />
+                    <Text style={[styles.dateInputText, { color: contractData.contract_start_date ? colors.textPrimary : colors.textSecondary }]}>
+                      {contractData.contract_start_date 
+                        ? startDate.toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric' })
+                        : 'Tarih seçin'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
 
-                <Input
-                  label="Sözleşme Bitiş Tarihi"
-                  value={contractData.contract_end_date}
-                  onChangeText={(text) => setContractData({ ...contractData, contract_end_date: text })}
-                  placeholder="YYYY-MM-DD"
-                />
+                {showStartDatePicker && (
+                  <DateTimePicker
+                    value={startDate}
+                    mode="date"
+                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                    onChange={handleStartDateChange}
+                    minimumDate={new Date(2020, 0, 1)}
+                    maximumDate={new Date(2099, 11, 31)}
+                  />
+                )}
+
+                <View style={styles.dateInputContainer}>
+                  <Text style={[styles.inputLabel, { color: colors.textPrimary }]}>
+                    Sözleşme Bitiş Tarihi
+                  </Text>
+                  <TouchableOpacity
+                    style={[styles.dateInput, { borderColor: colors.border, backgroundColor: colors.background }]}
+                    onPress={() => setShowEndDatePicker(true)}
+                  >
+                    <Ionicons name="calendar-outline" size={20} color={colors.primary} />
+                    <Text style={[styles.dateInputText, { color: contractData.contract_end_date ? colors.textPrimary : colors.textSecondary }]}>
+                      {contractData.contract_end_date 
+                        ? endDate.toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric' })
+                        : 'Tarih seçin'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                {showEndDatePicker && (
+                  <DateTimePicker
+                    value={endDate}
+                    mode="date"
+                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                    onChange={handleEndDateChange}
+                    minimumDate={startDate || new Date(2020, 0, 1)}
+                    maximumDate={new Date(2099, 11, 31)}
+                  />
+                )}
 
                 <View style={styles.selectContainer}>
                   <Text style={[styles.selectLabel, { color: colors.textPrimary }]}>
@@ -943,6 +1376,27 @@ const createStyles = (colors) => StyleSheet.create({
     fontSize: 12,
     textAlign: 'center',
     fontStyle: 'italic',
+  },
+  dateInputContainer: {
+    marginBottom: 16,
+  },
+  inputLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 8,
+  },
+  dateInput: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: SIZES.radius,
+    borderWidth: 1,
+    gap: 12,
+  },
+  dateInputText: {
+    fontSize: 16,
+    flex: 1,
   },
 });
 

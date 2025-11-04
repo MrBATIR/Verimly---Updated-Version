@@ -16,7 +16,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import { Container, Button, Input, Card } from '../components';
 import * as teacherApi from '../lib/teacherApi';
 import { sendMessage, getSentMessages, deleteMessage, deleteAllMessagesToStudent } from '../lib/messageApi';
-import { supabase } from '../lib/supabase';
+import { supabase, supabaseAdmin } from '../lib/supabase';
 
 const TeacherMessageScreen = () => {
   const [students, setStudents] = useState([]);
@@ -27,6 +27,8 @@ const TeacherMessageScreen = () => {
   const [sending, setSending] = useState(false);
   const [expandedStudents, setExpandedStudents] = useState({}); // student_id -> expanded state
   const [showNewMessage, setShowNewMessage] = useState(false);
+  const [isGuidanceTeacher, setIsGuidanceTeacher] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
   
   // Toast state'leri
   const [showToast, setShowToast] = useState(false);
@@ -116,40 +118,84 @@ const TeacherMessageScreen = () => {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
-      // Öğretmenin öğrencilerini getir
-      const teacherResult = await supabase
+      // Öğretmen ID'sini al
+      const { data: teacherData, error: teacherError } = await supabase
         .from('teachers')
         .select('id')
         .eq('user_id', user.id)
         .single();
-      
-      const { data: students, error: studentsError } = await supabase
-        .from('student_teachers')
-        .select(`
-          id,
-          student_id
-        `)
-        .eq('teacher_id', teacherResult.data?.id)
-        .eq('is_active', true)
-        .in('approval_status', ['approved', 'rejected']); // Onaylanmış ve reddedilen kesme istekleri
 
-      if (studentsError) {
-        console.error('Öğrenciler yüklenirken hata:', studentsError);
-        Alert.alert('Hata', 'Öğrenciler yüklenemedi');
+      if (teacherError || !teacherData) {
+        console.error('Öğretmen bulunamadı:', teacherError);
+        Alert.alert('Hata', 'Öğretmen bilgisi bulunamadı');
+        setLoading(false);
         return;
       }
 
-      const connectedStudentIds = students?.map(student => student.student_id) || [];
+      let studentIds = [];
+      let isGuidanceTeacherLocal = false;
+
+      // Rehber öğretmen kontrolü - Kurumunun rehber öğretmeni mi?
+      const { data: institutionData, error: institutionError } = await supabase
+        .from('institutions')
+        .select('id, name')
+        .eq('guidance_teacher_id', teacherData.id)
+        .eq('is_active', true)
+        .maybeSingle();
+
+      if (!institutionError && institutionData) {
+        isGuidanceTeacherLocal = true;
+        setIsGuidanceTeacher(true);
+        
+        // Rehber öğretmen - Kurumundaki tüm öğrencileri göster
+        const { data: institutionMemberships, error: membershipError } = await supabaseAdmin
+          .from('institution_memberships')
+          .select('user_id')
+          .eq('institution_id', institutionData.id)
+          .eq('role', 'student')
+          .eq('is_active', true);
+
+        if (!membershipError && institutionMemberships?.length > 0) {
+          studentIds = institutionMemberships.map(m => m.user_id).filter(Boolean);
+        }
+      } else {
+        setIsGuidanceTeacher(false);
+        // Normal öğretmen - Bağlı öğrencileri al
+        const { data: students, error: studentsError } = await supabase
+          .from('student_teachers')
+          .select('student_id')
+          .eq('teacher_id', teacherData.id)
+          .eq('is_active', true)
+          .in('approval_status', ['approved', 'rejected']); // Onaylanmış ve reddedilen kesme istekleri
+
+        if (studentsError) {
+          console.error('Öğrenciler yüklenirken hata:', studentsError);
+          Alert.alert('Hata', 'Öğrenciler yüklenemedi');
+          setLoading(false);
+          return;
+        }
+
+        studentIds = students?.map(student => student.student_id) || [];
+      }
+
+      if (studentIds.length === 0) {
+        setStudents([]);
+        setLoading(false);
+        return;
+      }
       
       // Öğrenci profil verilerini al
-      const { data: studentProfiles, error: profileError } = await supabase
+      const queryClient = isGuidanceTeacherLocal ? supabaseAdmin : supabase;
+      
+      const { data: studentProfiles, error: profileError } = await queryClient
         .from('user_profiles')
         .select('user_id, selected_avatar, name, email')
-        .in('user_id', connectedStudentIds);
+        .in('user_id', studentIds);
 
       if (profileError) {
         console.error('Öğrenci profilleri yüklenirken hata:', profileError);
         Alert.alert('Hata', 'Öğrenci profilleri yüklenemedi');
+        setLoading(false);
         return;
       }
 
@@ -160,6 +206,13 @@ const TeacherMessageScreen = () => {
         email: profile.email || '',
         avatar: profile.selected_avatar
       })) || [];
+
+      // Alfabetik sıralama (isme göre)
+      studentList.sort((a, b) => {
+        const nameA = (a.name || '').toLowerCase();
+        const nameB = (b.name || '').toLowerCase();
+        return nameA.localeCompare(nameB, 'tr');
+      });
 
       setStudents(studentList);
     } catch (error) {
@@ -393,13 +446,45 @@ const TeacherMessageScreen = () => {
     );
   }
 
+  // Filtrelenmiş öğrenci listesi
+  const filteredStudents = students.filter(student => {
+    if (!searchQuery.trim()) return true;
+    const query = searchQuery.toLowerCase();
+    return (
+      student.name?.toLowerCase().includes(query) ||
+      student.email?.toLowerCase().includes(query)
+    );
+  });
+
   return (
     <Container>
       <View style={styles.container}>
         <Text style={styles.title}>Öğrencilere Mesaj Gönder</Text>
         
+        {/* Arama Input */}
+        {students.length > 0 && (
+          <View style={styles.searchContainer}>
+            <Ionicons name="search" size={20} color="#666" style={styles.searchIcon} />
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Öğrenci adı ile ara..."
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              placeholderTextColor="#999"
+            />
+            {searchQuery.length > 0 && (
+              <TouchableOpacity
+                style={styles.clearSearchButton}
+                onPress={() => setSearchQuery('')}
+              >
+                <Ionicons name="close-circle" size={20} color="#666" />
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+        
         <FlatList
-          data={students}
+          data={filteredStudents}
           renderItem={({ item }) => renderStudentCard(item)}
           keyExtractor={(item) => item.id}
           style={styles.content}
@@ -408,10 +493,25 @@ const TeacherMessageScreen = () => {
           keyboardShouldPersistTaps="handled"
           ListEmptyComponent={() => (
             <View style={styles.emptyContainer}>
-              <Text style={styles.emptyText}>Henüz öğrenci yok</Text>
-              <Text style={styles.emptySubtext}>
-                Öğrencilerinizle bağlantı kurduktan sonra mesaj gönderebilirsiniz
-              </Text>
+              {searchQuery.trim().length > 0 ? (
+                <>
+                  <Ionicons name="search-outline" size={64} color="#ccc" />
+                  <Text style={styles.emptyText}>Arama sonucu bulunamadı</Text>
+                  <Text style={styles.emptySubtext}>
+                    "{searchQuery}" için öğrenci bulunamadı
+                  </Text>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.emptyText}>Henüz öğrenci yok</Text>
+                  <Text style={styles.emptySubtext}>
+                    {isGuidanceTeacher 
+                      ? 'Kurumda öğrenci bulunmamaktadır'
+                      : 'Öğrencilerinizle bağlantı kurduktan sonra mesaj gönderebilirsiniz'
+                    }
+                  </Text>
+                </>
+              )}
             </View>
           )}
         />
@@ -503,6 +603,30 @@ const styles = StyleSheet.create({
     marginBottom: 20,
     textAlign: 'center',
     color: '#333',
+  },
+  searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+  },
+  searchIcon: {
+    marginRight: 8,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 16,
+    color: '#333',
+    paddingVertical: 4,
+  },
+  clearSearchButton: {
+    marginLeft: 8,
+    padding: 4,
   },
   content: {
     flex: 1,

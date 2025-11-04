@@ -11,10 +11,17 @@ import {
   ScrollView
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useTheme } from '../contexts/ThemeContext';
+import { DARK_COLORS, COLORS, SIZES, SHADOWS } from '../constants/theme';
+import Container from '../components/Container';
 import { Card, Button, Input } from '../components';
-import { colors, SHADOWS } from '../constants/theme';
+import { supabase, supabaseAdmin } from '../lib/supabase';
 
 const AdminIndividualUsersScreen = ({ navigation }) => {
+  const { isDark } = useTheme();
+  const colors = isDark ? DARK_COLORS : COLORS;
+  const styles = createStyles(colors);
+  
   const [individualUsers, setIndividualUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -23,6 +30,7 @@ const AdminIndividualUsersScreen = ({ navigation }) => {
   const [selectedUser, setSelectedUser] = useState(null);
   const [institutions, setInstitutions] = useState([]);
   const [selectedInstitution, setSelectedInstitution] = useState('');
+  const [loadingMove, setLoadingMove] = useState(false);
 
   useEffect(() => {
     loadIndividualUsers();
@@ -33,16 +41,67 @@ const AdminIndividualUsersScreen = ({ navigation }) => {
   const loadIndividualUsers = async () => {
     try {
       setLoading(true);
-      const result = await AdSystem.getIndividualUsers();
       
-      if (result.success) {
-        setIndividualUsers(result.data || []);
-      } else {
-        Alert.alert('Hata', result.error || 'Bireysel kullanıcılar yüklenemedi');
+      // "Bireysel Kullanıcılar" kurumunu bul
+      const { data: individualInstitution, error: instError } = await supabaseAdmin
+        .from('institutions')
+        .select('id')
+        .eq('name', 'Bireysel Kullanıcılar')
+        .single();
+
+      if (instError || !individualInstitution) {
+        setIndividualUsers([]);
+        setLoading(false);
+        return;
       }
+
+      // Bu kuruma ait aktif üyeleri al
+      const { data: memberships, error: membershipError } = await supabaseAdmin
+        .from('institution_memberships')
+        .select('user_id, is_active')
+        .eq('institution_id', individualInstitution.id)
+        .eq('is_active', true);
+
+      if (membershipError || !memberships || memberships.length === 0) {
+        setIndividualUsers([]);
+        setLoading(false);
+        return;
+      }
+
+      // User ID'leri al
+      const userIds = memberships.map(m => m.user_id).filter(Boolean);
+
+      // User profiles ve detayları al
+      const { data: userProfiles, error: profileError } = await supabaseAdmin
+        .from('user_profiles')
+        .select('user_id, name, email, user_type, created_at')
+        .in('user_id', userIds);
+
+      if (profileError) {
+        throw profileError;
+      }
+
+      // Her kullanıcı için son giriş tarihini al (auth.users'dan)
+      const usersWithDetails = await Promise.all(
+        (userProfiles || []).map(async (profile) => {
+          // Auth'dan last_sign_in_at al
+          const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(profile.user_id);
+          
+          return {
+            user_id: profile.user_id,
+            name: profile.name,
+            email: profile.email,
+            user_type: profile.user_type,
+            created_at: profile.created_at,
+            last_login: authUser?.user?.last_sign_in_at || profile.created_at,
+          };
+        })
+      );
+
+      setIndividualUsers(usersWithDetails);
     } catch (error) {
       console.error('Bireysel kullanıcılar yükleme hatası:', error);
-      Alert.alert('Hata', 'Bireysel kullanıcılar yüklenirken bir hata oluştu');
+      Alert.alert('Hata', 'Bireysel kullanıcılar yüklenirken bir hata oluştu: ' + error.message);
     } finally {
       setLoading(false);
     }
@@ -50,27 +109,111 @@ const AdminIndividualUsersScreen = ({ navigation }) => {
 
   const loadStats = async () => {
     try {
-      const result = await AdSystem.getIndividualUsersStats();
-      
-      if (result.success) {
-        setStats(result.data?.[0] || null);
+      // "Bireysel Kullanıcılar" kurumunu bul
+      const { data: individualInstitution } = await supabaseAdmin
+        .from('institutions')
+        .select('id')
+        .eq('name', 'Bireysel Kullanıcılar')
+        .single();
+
+      if (!individualInstitution) {
+        setStats({
+          total_users: 0,
+          total_students: 0,
+          total_teachers: 0,
+          active_users_today: 0,
+          new_users_this_week: 0,
+          new_users_this_month: 0,
+        });
+        return;
+      }
+
+      // Aktif üyeleri say
+      const { count: totalUsers } = await supabaseAdmin
+        .from('institution_memberships')
+        .select('*', { count: 'exact', head: true })
+        .eq('institution_id', individualInstitution.id)
+        .eq('is_active', true);
+
+      // Öğrenci ve öğretmen sayılarını hesapla
+      const { data: memberships } = await supabaseAdmin
+        .from('institution_memberships')
+        .select('user_id')
+        .eq('institution_id', individualInstitution.id)
+        .eq('is_active', true);
+
+      if (memberships && memberships.length > 0) {
+        const userIds = memberships.map(m => m.user_id).filter(Boolean);
+        const { data: userProfiles } = await supabaseAdmin
+          .from('user_profiles')
+          .select('user_type, created_at')
+          .in('user_id', userIds);
+
+        const totalStudents = userProfiles?.filter(p => p.user_type === 'student').length || 0;
+        const totalTeachers = userProfiles?.filter(p => p.user_type === 'teacher').length || 0;
+
+        // Bugün aktif kullanıcılar (basit bir tahmin - son 24 saat içinde giriş yapanlar)
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const activeToday = userProfiles?.filter(p => {
+          const created = new Date(p.created_at);
+          return created >= today;
+        }).length || 0;
+
+        // Bu hafta yeni kullanıcılar
+        const weekAgo = new Date();
+        weekAgo.setDate(weekAgo.getDate() - 7);
+        const newThisWeek = userProfiles?.filter(p => {
+          const created = new Date(p.created_at);
+          return created >= weekAgo;
+        }).length || 0;
+
+        // Bu ay yeni kullanıcılar
+        const monthAgo = new Date();
+        monthAgo.setMonth(monthAgo.getMonth() - 1);
+        const newThisMonth = userProfiles?.filter(p => {
+          const created = new Date(p.created_at);
+          return created >= monthAgo;
+        }).length || 0;
+
+        setStats({
+          total_users: totalUsers || 0,
+          total_students: totalStudents,
+          total_teachers: totalTeachers,
+          active_users_today: activeToday,
+          new_users_this_week: newThisWeek,
+          new_users_this_month: newThisMonth,
+        });
+      } else {
+        setStats({
+          total_users: 0,
+          total_students: 0,
+          total_teachers: 0,
+          active_users_today: 0,
+          new_users_this_week: 0,
+          new_users_this_month: 0,
+        });
       }
     } catch (error) {
       console.error('İstatistik yükleme hatası:', error);
+      setStats(null);
     }
   };
 
   const loadInstitutions = async () => {
     try {
-      const result = await AdSystem.getAllInstitutions();
-      
-      if (result.success) {
-        // Bireysel kullanıcılar kurumunu filtrele
-        const filteredInstitutions = result.data?.filter(
-          inst => inst.name !== 'Bireysel Kullanıcılar'
-        ) || [];
-        setInstitutions(filteredInstitutions);
+      const { data: institutionsData, error } = await supabaseAdmin
+        .from('institutions')
+        .select('id, name, type')
+        .neq('name', 'Bireysel Kullanıcılar')
+        .order('name');
+
+      if (error) {
+        console.error('Kurumlar yükleme hatası:', error);
+        return;
       }
+
+      setInstitutions(institutionsData || []);
     } catch (error) {
       console.error('Kurumlar yükleme hatası:', error);
     }
@@ -92,25 +235,68 @@ const AdminIndividualUsersScreen = ({ navigation }) => {
       return;
     }
 
+    setLoadingMove(true);
     try {
-      const result = await AdSystem.moveIndividualUserToInstitution(
-        selectedUser.user_id,
-        selectedInstitution
-      );
+      const userId = selectedUser.user_id;
+      const userType = selectedUser.user_type; // 'teacher' veya 'student'
 
-      if (result.success) {
-        Alert.alert('Başarılı', 'Kullanıcı kuruma taşındı');
-        setShowMoveModal(false);
-        setSelectedUser(null);
-        setSelectedInstitution('');
-        loadIndividualUsers();
-        loadStats();
-      } else {
-        Alert.alert('Hata', result.error || 'Kullanıcı taşınamadı');
+      // 1. Eski kurumdaki (Bireysel Kullanıcılar) institution_memberships kaydını sil
+      const { error: deleteError } = await supabaseAdmin
+        .from('institution_memberships')
+        .delete()
+        .eq('user_id', userId);
+
+      if (deleteError) {
+        throw new Error('Eski üyelik silinemedi: ' + deleteError.message);
       }
+
+      // 2. Yeni kuruma institution_memberships ekle
+      const { error: insertError } = await supabaseAdmin
+        .from('institution_memberships')
+        .insert({
+          institution_id: selectedInstitution,
+          user_id: userId,
+          role: userType,
+          is_active: true
+        });
+
+      if (insertError) {
+        throw new Error('Yeni üyelik eklenemedi: ' + insertError.message);
+      }
+
+      // 3. teachers veya students tablosundaki institution_id'yi güncelle
+      if (userType === 'teacher') {
+        const { error: teacherUpdateError } = await supabaseAdmin
+          .from('teachers')
+          .update({ institution_id: selectedInstitution })
+          .eq('user_id', userId);
+
+        if (teacherUpdateError) {
+          console.warn('Öğretmen institution_id güncellenemedi:', teacherUpdateError);
+        }
+      } else if (userType === 'student') {
+        const { error: studentUpdateError } = await supabaseAdmin
+          .from('students')
+          .update({ institution_id: selectedInstitution })
+          .eq('user_id', userId);
+
+        if (studentUpdateError) {
+          console.warn('Öğrenci institution_id güncellenemedi:', studentUpdateError);
+        }
+      }
+
+      const targetInstitution = institutions.find(inst => inst.id === selectedInstitution);
+      Alert.alert('Başarılı', `Kullanıcı "${targetInstitution?.name}" kurumuna taşındı`);
+      setShowMoveModal(false);
+      setSelectedUser(null);
+      setSelectedInstitution('');
+      loadIndividualUsers();
+      loadStats();
     } catch (error) {
       console.error('Kullanıcı taşıma hatası:', error);
-      Alert.alert('Hata', 'Kullanıcı taşınırken bir hata oluştu');
+      Alert.alert('Hata', 'Kullanıcı taşınamadı: ' + error.message);
+    } finally {
+      setLoadingMove(false);
     }
   };
 
@@ -201,7 +387,8 @@ const AdminIndividualUsersScreen = ({ navigation }) => {
   };
 
   return (
-    <View style={styles.container}>
+    <Container>
+      <View style={styles.container}>
       <View style={styles.header}>
         <TouchableOpacity
           style={styles.backButton}
@@ -321,20 +508,22 @@ const AdminIndividualUsersScreen = ({ navigation }) => {
                 textStyle={styles.cancelButtonText}
               />
               <Button
-                title="Taşı"
+                title={loadingMove ? "Taşınıyor..." : "Taşı"}
                 onPress={handleMoveToInstitution}
                 style={styles.confirmButton}
                 textStyle={styles.confirmButtonText}
+                disabled={loadingMove}
               />
             </View>
           </View>
         </View>
       </Modal>
-    </View>
+      </View>
+    </Container>
   );
 };
 
-const styles = StyleSheet.create({
+const createStyles = (colors) => StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,

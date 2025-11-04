@@ -9,6 +9,7 @@ import AdminStudentsScreen from '../screens/AdminStudentsScreen';
 import AdminInstitutionsScreen from '../screens/AdminInstitutionsScreen';
 import AdminIndividualUsersScreen from '../screens/AdminIndividualUsersScreen';
 import InstitutionAdminScreen from '../screens/InstitutionAdminScreen';
+import InstitutionAdminLoginScreen from '../screens/InstitutionAdminLoginScreen';
 import { COLORS } from '../constants/theme';
 
 const Stack = createNativeStackNavigator();
@@ -16,6 +17,7 @@ const Stack = createNativeStackNavigator();
 export default function AuthNavigator() {
   return (
     <Stack.Navigator
+      initialRouteName="Login"
       screenOptions={{
         headerStyle: {
           backgroundColor: COLORS.surface,
@@ -37,6 +39,14 @@ export default function AuthNavigator() {
         component={RegisterScreen}
         options={{
           headerTitle: '',
+          headerBackVisible: true,
+        }}
+      />
+      <Stack.Screen 
+        name="InstitutionAdminLogin" 
+        component={InstitutionAdminLoginScreen}
+        options={{
+          headerTitle: 'Kurum Admin Girişi',
           headerBackVisible: true,
         }}
       />

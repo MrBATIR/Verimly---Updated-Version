@@ -154,18 +154,28 @@ const StudentPlanScreen = ({ route }) => {
 
         if (error) throw error;
         
-        // Öğretmen adlarını al
+        // Öğretmen adlarını ve rehber öğretmen bilgisini al
         const plansWithTeacherNames = await Promise.all(
           (data || []).map(async (plan) => {
-            if (plan.created_by_teacher?.user_id) {
+            if (plan.created_by_teacher?.id) {
               const { data: profile } = await supabase
                 .from('user_profiles')
                 .select('name')
                 .eq('user_id', plan.created_by_teacher.user_id)
                 .single();
+              
+              // Rehber öğretmen kontrolü
+              const { data: institutionData } = await supabase
+                .from('institutions')
+                .select('id')
+                .eq('guidance_teacher_id', plan.created_by_teacher.id)
+                .eq('is_active', true)
+                .maybeSingle();
+              
               return {
                 ...plan,
-                teacherName: profile?.name || 'Öğretmen'
+                teacherName: profile?.name || 'Öğretmen',
+                isGuidanceTeacher: !!institutionData
               };
             }
             return plan;
@@ -188,18 +198,28 @@ const StudentPlanScreen = ({ route }) => {
 
         if (error) throw error;
         
-        // Öğretmen adlarını al
+        // Öğretmen adlarını ve rehber öğretmen bilgisini al
         const plansWithTeacherNames = await Promise.all(
           (data || []).map(async (plan) => {
-            if (plan.created_by_teacher?.user_id) {
+            if (plan.created_by_teacher?.id) {
               const { data: profile } = await supabase
                 .from('user_profiles')
                 .select('name')
                 .eq('user_id', plan.created_by_teacher.user_id)
                 .single();
+              
+              // Rehber öğretmen kontrolü
+              const { data: institutionData } = await supabase
+                .from('institutions')
+                .select('id')
+                .eq('guidance_teacher_id', plan.created_by_teacher.id)
+                .eq('is_active', true)
+                .maybeSingle();
+              
               return {
                 ...plan,
-                teacherName: profile?.name || 'Öğretmen'
+                teacherName: profile?.name || 'Öğretmen',
+                isGuidanceTeacher: !!institutionData
               };
             }
             return plan;
@@ -419,10 +439,20 @@ const StudentPlanScreen = ({ route }) => {
             <View style={styles.planInfo}>
               {/* Plan türü badge'i */}
               {isTeacherPlan ? (
-                <View style={styles.teacherBadge}>
-                  <Ionicons name="school" size={12} color="#fff" />
+                <View style={[
+                  styles.teacherBadge,
+                  item.isGuidanceTeacher && styles.guidanceTeacherBadge
+                ]}>
+                  <Ionicons 
+                    name={item.isGuidanceTeacher ? "shield-checkmark" : "school"} 
+                    size={12} 
+                    color="#fff" 
+                  />
                   <Text style={styles.teacherBadgeText}>
-                    {teacherName} tarafından oluşturuldu
+                    {item.isGuidanceTeacher 
+                      ? `${teacherName} (Rehber Öğretmen) tarafından oluşturuldu`
+                      : `${teacherName} tarafından oluşturuldu`
+                    }
                   </Text>
                 </View>
               ) : (
@@ -796,6 +826,9 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignSelf: 'flex-start',
     marginBottom: 8,
+  },
+  guidanceTeacherBadge: {
+    backgroundColor: '#9C27B0', // Mor renk rehber öğretmen için
   },
   teacherBadgeText: {
     color: '#fff',

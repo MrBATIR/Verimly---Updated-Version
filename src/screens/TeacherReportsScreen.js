@@ -9,14 +9,15 @@ import {
   Platform,
   Animated,
   Alert,
-  Modal
+  Modal,
+  TextInput
 } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Container, StudyDetailModal } from '../components';
 import { COLORS, DARK_COLORS, SIZES, SHADOWS } from '../constants/theme';
-import { supabase } from '../lib/supabase';
+import { supabase, supabaseAdmin } from '../lib/supabase';
 import { useTheme } from '../contexts/ThemeContext';
 import TeacherStudentDetailScreen from './TeacherStudentDetailScreen';
 
@@ -36,6 +37,8 @@ export default function TeacherReportsScreen({ route, navigation }) {
   });
   const [selectedStudy, setSelectedStudy] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isGuidanceTeacher, setIsGuidanceTeacher] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
   
   // Tema context'ini kullan
   const { isDark } = useTheme();
@@ -181,9 +184,45 @@ export default function TeacherReportsScreen({ route, navigation }) {
         .single();
 
       if (teacherError || !teacherData) {
+        console.error('Öğretmen bulunamadı:', teacherError);
+        setIsLoading(false);
         return;
       }
 
+      let studentIds = [];
+      let isGuidanceTeacherLocal = false;
+
+      // Rehber öğretmen kontrolü - Kurumunun rehber öğretmeni mi?
+      const { data: institutionData, error: institutionError } = await supabase
+        .from('institutions')
+        .select('id, name')
+        .eq('guidance_teacher_id', teacherData.id)
+        .eq('is_active', true)
+        .maybeSingle();
+
+      if (!institutionError && institutionData) {
+        isGuidanceTeacherLocal = true;
+        setIsGuidanceTeacher(true);
+        
+        // Rehber öğretmen - Kurumundaki tüm öğrencilerin çalışmalarını göster
+        const { data: institutionMemberships, error: membershipError } = await supabase
+          .from('institution_memberships')
+          .select('user_id')
+          .eq('institution_id', institutionData.id)
+          .eq('role', 'student')
+          .eq('is_active', true);
+
+        if (!membershipError && institutionMemberships?.length > 0) {
+          studentIds = institutionMemberships.map(m => m.user_id).filter(Boolean);
+        } else {
+          console.warn('⚠️ Rehber öğretmen ama kurumunda aktif öğrenci bulunamadı');
+        }
+      } else {
+        setIsGuidanceTeacher(false);
+      }
+
+      // Eğer rehber öğretmen değilse, bağlı öğrencileri göster
+      if (!isGuidanceTeacherLocal && studentIds.length === 0) {
       // Bağlı öğrencileri al
       const { data: studentConnections, error: connectionsError } = await supabase
         .from('student_teachers')
@@ -193,94 +232,159 @@ export default function TeacherReportsScreen({ route, navigation }) {
         .eq('is_active', true);
 
       if (connectionsError || !studentConnections?.length) {
+          console.warn('⚠️ Bağlı öğrenci bulunamadı');
         setLogs([]);
         calculateStats([]);
         setStudentStats({});
+          setIsLoading(false);
         return;
       }
 
-      const studentIds = studentConnections.map(conn => conn.student_id);
+        studentIds = studentConnections.map(conn => conn.student_id).filter(Boolean);
+      } else if (isGuidanceTeacherLocal && studentIds.length === 0) {
+        // Rehber öğretmen ama kurumunda öğrenci yok
+        setLogs([]);
+        calculateStats([]);
+        setStudentStats({});
+        setIsLoading(false);
+        return;
+      }
+
+      if (studentIds.length === 0) {
+        setLogs([]);
+        calculateStats([]);
+        setStudentStats({});
+        setIsLoading(false);
+        return;
+      }
+
       const { startDate, endDate } = getDateRange();
       
-      // Öğrencilerin çalışma loglarını al - Kesin tarih aralığı
-      const startDateStr = startDate.toISOString().split('T')[0]; // YYYY-MM-DD formatı
-      const endDateStr = endDate.toISOString().split('T')[0]; // YYYY-MM-DD formatı
+      // Rehber öğretmen için supabaseAdmin kullan (RLS'i bypass et)
+      const queryClient = isGuidanceTeacherLocal ? supabaseAdmin : supabase;
       
-      
-      
-      const { data, error } = await supabase
+      // Öğrencilerin çalışma loglarını al - UTC bazlı tam tarih aralığı
+      const { data, error } = await queryClient
         .from('study_logs')
         .select('*')
         .in('user_id', studentIds)
-        .gte('study_date', startDateStr + 'T00:00:00.000Z')
-        .lte('study_date', endDateStr + 'T23:59:59.999Z')
+        .gte('study_date', startDate.toISOString())
+        .lte('study_date', endDate.toISOString())
         .order('study_date', { ascending: false });
 
-      if (error) throw error;
+      if (error) {
+        console.error('Study logs query hatası:', error);
+        throw error;
+      }
 
-
-      // Client-side'da kesin tarih filtrelemesi
+      // Client-side'da kesin tarih filtrelemesi (ekstra güvenlik için)
+      // selectedDate local timezone'da, veritabanı UTC'de saklanıyor
+      // Ama öğrenci hangi tarihte kaydetti ise o tarihte görünmeli (local timezone)
+      // Bu yüzden filtrelemeyi local timezone'a göre yapıyoruz
+      const selectedYear = selectedDate.getFullYear();
+      const selectedMonth = selectedDate.getMonth();
+      const selectedDay = selectedDate.getDate();
+      
       const filteredData = (data || []).filter(log => {
         if (!log.study_date) return false;
         
-        // Tarih karşılaştırması için daha güvenilir yöntem
         const logDate = new Date(log.study_date);
+        
+        // viewMode'a göre filtreleme
+        if (viewMode === 'daily') {
+          // Günlük görünüm - Local timezone bazlı tarih karşılaştırması
+          // Öğrenci hangi tarihte kaydetti ise o tarihte görünsün (local timezone)
         const logYear = logDate.getFullYear();
         const logMonth = logDate.getMonth();
         const logDay = logDate.getDate();
         
-        // Sadece seçili günün verilerini göster
-        if (viewMode === 'daily') {
-          // selectedDate zaten Date objesi, tekrar new Date() yapmaya gerek yok
-          const selectedYear = selectedDate.getFullYear();
-          const selectedMonth = selectedDate.getMonth();
-          const selectedDay = selectedDate.getDate();
-          
-          
-          return logYear === selectedYear && logMonth === selectedMonth && logDay === selectedDay;
+          // Local timezone'da tarih karşılaştırması
+          return logYear === selectedYear && 
+                 logMonth === selectedMonth && 
+                 logDay === selectedDay;
+        } else if (viewMode === 'weekly' || viewMode === 'monthly') {
+          // Haftalık/aylık görünüm - zaman damgası bazlı aralık kontrolü
+          const logTime = logDate.getTime();
+          return logTime >= startDate.getTime() && logTime <= endDate.getTime();
         }
         
         // Diğer görünümler için veritabanı filtrelemesi yeterli
         return true;
       });
       
-      
-      
       setLogs(filteredData);
       calculateStats(filteredData);
-      await calculateStudentStats(filteredData, studentIds);
+      await calculateStudentStats(filteredData, studentIds, isGuidanceTeacherLocal);
       
     } catch (error) {
-      // Hata durumunda sessizce devam et
+      console.error('fetchLogs hatası:', error);
+      // Hata durumunda boş liste göster
+      setLogs([]);
+      calculateStats([]);
+      setStudentStats({});
     } finally {
       setIsLoading(false);
     }
   };
 
   const getDateRange = () => {
+    // selectedDate local timezone'da bir Date objesi
+    // Kullanıcı "1 Kasım" seçtiyse, local timezone'da 1 Kasım'ı filtrelemeli
+    // Öğrenci hangi tarihte kaydetti ise o tarihte görünsün (local timezone)
+    const selectedYear = selectedDate.getFullYear();
+    const selectedMonth = selectedDate.getMonth();
+    const selectedDay = selectedDate.getDate();
 
-    const start = new Date(selectedDate);
-    const end = new Date(selectedDate);
+    let start, end;
 
     if (viewMode === 'daily') {
-      // Sadece seçili günün 00:00-23:59 aralığı
-      start.setHours(0, 0, 0, 0);
-      end.setHours(23, 59, 59, 999);
+      // Seçili günün başlangıcı ve sonu (local timezone)
+      // Örneğin: 1 Kasım seçildiyse -> 1 Kasım 00:00:00 - 23:59:59 (local timezone)
+      // Veritabanı sorgusu için UTC'ye çeviriyoruz ama filtreleme local timezone'da yapılacak
+      const localStart = new Date(selectedYear, selectedMonth, selectedDay, 0, 0, 0, 0);
+      const localEnd = new Date(selectedYear, selectedMonth, selectedDay, 23, 59, 59, 999);
+      
+      // Veritabanı sorgusu için UTC'ye çevir (geniş aralık için)
+      // Local timezone'daki günün başı ve sonunun UTC karşılığını al
+      // Türkiye'de 1 Kasım 00:00:00 (UTC+3) = UTC'de 31 Ekim 21:00:00
+      // Türkiye'de 1 Kasım 23:59:59 (UTC+3) = UTC'de 1 Kasım 20:59:59
+      // Bu yüzden biraz geniş bir aralık kullanmalıyız
+      start = new Date(localStart);
+      start.setHours(start.getHours() - 12); // 12 saat öncesi (buffer)
+      end = new Date(localEnd);
+      end.setHours(end.getHours() + 12); // 12 saat sonrası (buffer)
       
     } else if (viewMode === 'weekly') {
-      // Seçili tarih baz alınarak 7 günlük aralık (navigasyon için)
-      end.setTime(selectedDate.getTime()); // Seçili tarih son gün
-      end.setHours(23, 59, 59, 999);
-      start.setTime(selectedDate.getTime() - (6 * 24 * 60 * 60 * 1000)); // 6 gün öncesi
-      start.setHours(0, 0, 0, 0);
+      // Seçili tarih baz alınarak 7 günlük aralık (local timezone)
+      const weekStart = new Date(selectedYear, selectedMonth, selectedDay, 0, 0, 0, 0);
+      weekStart.setDate(weekStart.getDate() - 6); // 6 gün öncesi
+      const localEnd = new Date(selectedYear, selectedMonth, selectedDay, 23, 59, 59, 999);
+      
+      // UTC buffer ekle
+      start = new Date(weekStart);
+      start.setHours(start.getHours() - 12);
+      end = new Date(localEnd);
+      end.setHours(end.getHours() + 12);
     } else if (viewMode === 'monthly') {
-      start.setDate(0); // Önceki ayın son günü (buffer)
-      start.setHours(0, 0, 0, 0);
-      end.setMonth(end.getMonth() + 1);
-      end.setDate(1); // Sonraki ayın ilk günü (buffer)
-      end.setHours(23, 59, 59, 999);
+      // Ayın başından sonuna kadar (local timezone)
+      const monthStart = new Date(selectedYear, selectedMonth, 1, 0, 0, 0, 0);
+      const lastDayOfMonth = new Date(selectedYear, selectedMonth + 1, 0);
+      const monthEnd = new Date(selectedYear, selectedMonth, lastDayOfMonth.getDate(), 23, 59, 59, 999);
+      
+      // UTC buffer ekle
+      start = new Date(monthStart);
+      start.setHours(start.getHours() - 12);
+      end = new Date(monthEnd);
+      end.setHours(end.getHours() + 12);
+    } else {
+      // Fallback
+      const localStart = new Date(selectedYear, selectedMonth, selectedDay, 0, 0, 0, 0);
+      const localEnd = new Date(selectedYear, selectedMonth, selectedDay, 23, 59, 59, 999);
+      start = new Date(localStart);
+      start.setHours(start.getHours() - 12);
+      end = new Date(localEnd);
+      end.setHours(end.getHours() + 12);
     }
-
 
     return { startDate: start, endDate: end };
   };
@@ -299,38 +403,48 @@ export default function TeacherReportsScreen({ route, navigation }) {
     });
   };
 
-  const calculateStudentStats = async (data, studentIds) => {
+  const calculateStudentStats = async (data, studentIds, isGuidanceTeacher = false) => {
     try {
+      let studentProfiles = [];
       
-      // Student stats'i temizleme - sadece yeni veri geldiğinde
-      
-      // Alternatif yöntem: Öğretmen-öğrenci bağlantısını kontrol et
+      // Rehber öğretmen değilse, bağlı öğrencilerin profil verilerini al
+      if (!isGuidanceTeacher) {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
+        // Öğretmen ID'sini al
+        const { data: teacherData } = await supabase
+          .from('teachers')
+          .select('id')
+          .eq('user_id', user.id)
+          .maybeSingle();
+
+        if (teacherData) {
       // Öğretmenin bağlı öğrencilerini al
       const { data: teacherConnections, error: connectionError } = await supabase
         .from('student_teachers')
-        .select(`
-          student_id,
-          teachers!inner(user_id)
-        `)
-        .eq('teachers.user_id', user.id)
+            .select('student_id')
+            .eq('teacher_id', teacherData.id)
+            .eq('is_active', true)
         .eq('approval_status', 'approved');
 
-      
-
       // Bağlı öğrencilerin profil verilerini al
-      const connectedStudentIds = teacherConnections?.map(conn => conn.student_id) || [];
+          const connectedStudentIds = teacherConnections?.map(conn => conn.student_id).filter(Boolean) || [];
       
-      // RLS politikası sorunu nedeniyle user_profiles yerine study_logs'dan avatar al
-      const { data: studentProfiles, error } = await supabase
+          if (connectedStudentIds.length > 0) {
+            const { data: profiles, error } = await supabase
         .from('user_profiles')
         .select('user_id, selected_avatar')
         .in('user_id', connectedStudentIds);
 
-      if (error) {
-        // RLS hatası varsa, avatar verilerini study_logs'dan al
+            if (!error && profiles) {
+              studentProfiles = profiles;
+            }
+          }
+        }
+      } else {
+        // Rehber öğretmen için direkt studentIds kullan
+        // Profilleri ayrı ayrı çekeceğiz (her öğrenci için)
       }
       
 
@@ -341,7 +455,11 @@ export default function TeacherReportsScreen({ route, navigation }) {
       const studentStatsMap = {};
       
       // Her öğrenci için istatistikleri hesapla
+      // isGuidanceTeacher değerini yerel bir değişkene kopyala (closure sorununu önlemek için)
+      const isGuidanceTeacherLocal = Boolean(isGuidanceTeacher);
+      
       for (const studentId of studentIds) {
+        try {
         const studentLogs = data.filter(log => log.user_id === studentId);
         const studentProfile = studentProfiles?.find(p => p.user_id === studentId);
         
@@ -364,22 +482,24 @@ export default function TeacherReportsScreen({ route, navigation }) {
         let studentName = 'Bilinmeyen Öğrenci';
         let studentEmail = 'email@example.com';
         
-        // user_profiles tablosundan gerçek bilgileri çek
-        const { data: profile, error: profileError } = await supabase
+          // user_profiles tablosundan gerçek bilgileri çek - rehber öğretmen için supabaseAdmin kullan
+          const profileClient = isGuidanceTeacherLocal ? supabaseAdmin : supabase;
+          const { data: profile, error: profileError } = await profileClient
           .from('user_profiles')
-          .select('user_id, name, email')
+            .select('user_id, name, email, selected_avatar')
           .eq('user_id', studentId)
-          .single();
+            .maybeSingle();
         
         if (!profileError && profile) {
           studentName = profile.name;
           studentEmail = profile.email;
-        } else {
+          } else if (profileError) {
+            console.error('Profil bulunamadı, studentId:', studentId, 'error:', profileError);
         }
 
 
-        // Avatar'ı studentProfile'dan al, yoksa default avatar kullan
-        const avatar = studentProfile?.selected_avatar || '👤';
+          // Avatar'ı profile'dan al, yoksa studentProfile'dan, yoksa default avatar kullan
+          const avatar = profile?.selected_avatar || studentProfile?.selected_avatar || '👤';
         
         studentStatsMap[studentId] = {
           name: studentName,
@@ -389,12 +509,18 @@ export default function TeacherReportsScreen({ route, navigation }) {
           totalStudies,
           totalQuestions,
         };
-        
+        } catch (studentError) {
+          console.error('Öğrenci istatistiği hesaplanırken hata (studentId:', studentId, '):', studentError);
+          // Bu öğrenciyi atla, diğerlerine devam et
+          continue;
+        }
       }
 
       setStudentStats(studentStatsMap);
     } catch (error) {
-      // Hata durumunda sessizce devam et
+      console.error('calculateStudentStats hatası:', error);
+      // Hata durumunda sessizce devam et - boş stats göster
+      setStudentStats({});
     }
   };
 
@@ -612,6 +738,28 @@ export default function TeacherReportsScreen({ route, navigation }) {
         <View style={styles.logsSection}>
           <Text style={styles.sectionTitle}>Öğrenci Performansları</Text>
           
+          {/* Arama Input */}
+          {Object.keys(studentStats).length > 0 && (
+            <View style={styles.searchContainer}>
+              <Ionicons name="search" size={20} color={colors.textSecondary} style={styles.searchIcon} />
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Öğrenci adı ile ara..."
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                placeholderTextColor={colors.textSecondary}
+              />
+              {searchQuery.length > 0 && (
+                <TouchableOpacity
+                  style={styles.clearSearchButton}
+                  onPress={() => setSearchQuery('')}
+                >
+                  <Ionicons name="close-circle" size={20} color={colors.textSecondary} />
+                </TouchableOpacity>
+              )}
+            </View>
+          )}
+          
           {Object.keys(studentStats).length === 0 ? (
             <View style={styles.emptyState}>
               <Ionicons name="people-outline" size={64} color={colors.textLight} />
@@ -619,13 +767,39 @@ export default function TeacherReportsScreen({ route, navigation }) {
               <Text style={styles.emptySubtext}>Öğrencileriniz çalışmaya başladığında burada görünecek!</Text>
             </View>
           ) : (
-             Object.entries(studentStats).map(([studentId, studentData]) => (
+             Object.entries(studentStats)
+               .filter(([studentId, studentData]) => {
+                 if (!searchQuery.trim()) return true;
+                 const query = searchQuery.toLowerCase();
+                 return (
+                   studentData.name?.toLowerCase().includes(query) ||
+                   studentData.email?.toLowerCase().includes(query)
+                 );
+               })
+               .sort(([idA, dataA], [idB, dataB]) => {
+                 const nameA = (dataA.name || '').toLowerCase();
+                 const nameB = (dataB.name || '').toLowerCase();
+                 return nameA.localeCompare(nameB, 'tr');
+               })
+               .map(([studentId, studentData]) => (
                <TouchableOpacity 
                  key={studentId} 
                  style={styles.studentCard}
                  onPress={() => {
-                   // Öğrenci detay modalını aç
-                   setSelectedStudent({ studentId, studentData, selectedDate, viewMode });
+                  // Öğrenci detay modalını aç - rehber öğretmen bilgisini de geçir
+                  // selectedDate'i geçir - local timezone'daki yıl/ay/gün'ü koru
+                  // toISOString() UTC'ye çevirir, bu yüzden local tarihin string formatını kullan
+                  const dateStr = selectedDate 
+                    ? `${selectedDate.getFullYear()}-${String(selectedDate.getMonth() + 1).padStart(2, '0')}-${String(selectedDate.getDate()).padStart(2, '0')}`
+                    : new Date().toISOString().split('T')[0];
+                  
+                  setSelectedStudent({ 
+                    studentId, 
+                    studentData, 
+                    selectedDate: dateStr, 
+                    viewMode,
+                    isGuidanceTeacher: isGuidanceTeacher 
+                  });
                    setShowStudentDetail(true);
                  }}
                  activeOpacity={0.7}
@@ -664,6 +838,24 @@ export default function TeacherReportsScreen({ route, navigation }) {
                 </View>
               </TouchableOpacity>
             ))
+          )}
+          
+          {/* Arama sonucu bulunamadı */}
+          {Object.keys(studentStats).length > 0 && 
+           Object.entries(studentStats)
+             .filter(([studentId, studentData]) => {
+               if (!searchQuery.trim()) return false;
+               const query = searchQuery.toLowerCase();
+               return (
+                 studentData.name?.toLowerCase().includes(query) ||
+                 studentData.email?.toLowerCase().includes(query)
+               );
+             }).length === 0 && searchQuery.trim().length > 0 && (
+            <View style={styles.emptySearchContainer}>
+              <Ionicons name="search-outline" size={48} color={colors.textSecondary} />
+              <Text style={styles.emptySearchText}>Arama sonucu bulunamadı</Text>
+              <Text style={styles.emptySearchSubtext}>"{searchQuery}" için öğrenci bulunamadı</Text>
+            </View>
           )}
         </View>
       </ScrollView>
@@ -864,7 +1056,8 @@ export default function TeacherReportsScreen({ route, navigation }) {
                 studentId: selectedStudent.studentId,
                 studentData: selectedStudent.studentData,
                 selectedDate: selectedStudent.selectedDate,
-                viewMode: selectedStudent.viewMode
+                viewMode: selectedStudent.viewMode,
+                isGuidanceTeacher: selectedStudent.isGuidanceTeacher || false
               }
             }}
             navigation={{
@@ -1047,6 +1240,48 @@ const createStyles = (colors) => StyleSheet.create({
     fontWeight: 'bold',
     color: colors.textPrimary,
     marginBottom: SIZES.padding,
+  },
+  searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderRadius: SIZES.radius,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  searchIcon: {
+    marginRight: 8,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: SIZES.body,
+    color: colors.textPrimary,
+    paddingVertical: 4,
+  },
+  clearSearchButton: {
+    marginLeft: 8,
+    padding: 4,
+  },
+  emptySearchContainer: {
+    padding: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 20,
+  },
+  emptySearchText: {
+    fontSize: SIZES.body,
+    fontWeight: '600',
+    color: colors.textSecondary,
+    marginTop: 12,
+  },
+  emptySearchSubtext: {
+    fontSize: SIZES.small,
+    color: colors.textSecondary,
+    marginTop: 4,
+    textAlign: 'center',
   },
   
   // Student Card

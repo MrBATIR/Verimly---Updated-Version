@@ -2,31 +2,20 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, KeyboardAvoidingView, Platform, ScrollView, Alert, TouchableOpacity, Modal, FlatList, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import { useNavigation } from '@react-navigation/native';
 import { Container, Input, Button, InterstitialAd } from '../components';
 import { COLORS, DARK_COLORS, SIZES } from '../constants/theme';
 import { supabase, supabaseAdmin } from '../lib/supabase';
 import { useTheme } from '../contexts/ThemeContext';
 
-export default function LoginScreen({ navigation }) {
+export default function LoginScreen({ navigation: navigationProp }) {
+  // useNavigation hook'u ile navigation context'ini al
+  const navigationFromHook = useNavigation();
+  const navigation = navigationProp || navigationFromHook;
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [showAdminLogin, setShowAdminLogin] = useState(false);
-  const [showAdminDashboard, setShowAdminDashboard] = useState(false);
-  const [showAdminMainPanel, setShowAdminMainPanel] = useState(false);
-  const [adminStats, setAdminStats] = useState({
-    totalInstitutions: 0,
-    activeInstitutions: 0,
-    totalTeachers: 0,
-    totalStudents: 0,
-    individualUsers: 0,
-    totalConnections: 0,
-  });
-  const [institutionStats, setInstitutionStats] = useState([]);
-  const [loadingAdminStats, setLoadingAdminStats] = useState(false);
-  const [showAdminTeachers, setShowAdminTeachers] = useState(false);
-  const [showAdminStudents, setShowAdminStudents] = useState(false);
-  const [showAdminInstitutions, setShowAdminInstitutions] = useState(false);
   const [showAddInstitution, setShowAddInstitution] = useState(false);
   const [showInstitutionList, setShowInstitutionList] = useState(false);
   const [showContractManagement, setShowContractManagement] = useState(false);
@@ -564,17 +553,6 @@ export default function LoginScreen({ navigation }) {
     };
   }, [adminTapTimeout]);
 
-  // Admin dashboard açıldığında otomatik sözleşme kontrolü yap
-  useEffect(() => {
-    if (showAdminDashboard) {
-      checkContractExpiry().then(() => {
-        // Kontrol sonrası istatistikleri yenile
-        loadAdminStats();
-        loadInstitutions();
-      });
-    }
-  }, [showAdminDashboard]);
-
   // Sözleşme takibi modalı açıldığında da kontrol yap
   useEffect(() => {
     if (showContractManagement) {
@@ -594,8 +572,11 @@ export default function LoginScreen({ navigation }) {
     setAdminTapCount(prev => {
       const newCount = prev + 1;
       
-      if (newCount >= 5) { // 5 kez tıklayınca admin paneli açılır
-        setShowAdminLogin(true);
+      if (newCount >= 5) { // 5 kez tıklayınca AdminLogin ekranına yönlendir
+        // AdminLogin ekranına navigate et
+        if (navigation && navigation.navigate) {
+          navigation.navigate('AdminLogin');
+        }
         return 0; // Sayaç sıfırla
       }
       
@@ -824,7 +805,6 @@ export default function LoginScreen({ navigation }) {
       });
 
       setShowAddInstitution(false);
-      setShowAdminInstitutions(true);
     } catch (error) {
       console.error('Kurum ekleme hatası:', error);
       Alert.alert('Hata', 'Kurum eklenemedi');
@@ -1366,24 +1346,84 @@ export default function LoginScreen({ navigation }) {
   };
 
   const handleAdminLogin = async () => {
-    if (adminUsername === 'admin' && adminPassword === 'admin123') {
-      setAdminLoading(true);
-      // Admin girişi başarılı - admin paneline yönlendir
-      Alert.alert('Başarılı', 'Admin paneline yönlendiriliyorsunuz...', [
-        {
-          text: 'Tamam',
-          onPress: () => {
-            setShowAdminLogin(false);
-            setShowAdminDashboard(true);
-            setAdminUsername('');
-            setAdminPassword('');
-          }
-        }
-      ]);
-    } else {
-      Alert.alert('Hata', 'Kullanıcı adı veya şifre hatalı!');
+    if (!adminUsername.trim() || !adminPassword.trim()) {
+      Alert.alert('Hata', 'E-posta ve şifre gereklidir');
+      return;
     }
-    setAdminLoading(false);
+
+    setAdminLoading(true);
+    try {
+      // Supabase Auth ile giriş yap
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: adminUsername.trim(), // E-posta formatında bekleniyor
+        password: adminPassword
+      });
+
+      if (error) {
+        console.error('Admin giriş hatası:', error);
+        let errorMessage = 'Geçersiz giriş bilgileri';
+        
+        if (error.message?.includes('Invalid login credentials') || error.message?.includes('invalid_credentials')) {
+          errorMessage = 'E-posta veya şifre hatalı. Lütfen bilgilerinizi kontrol edin.\n\nAdmin kullanıcısı oluşturulmamışsa, create_admin_user.js script\'ini çalıştırmanız gerekebilir.';
+        } else if (error.message?.includes('Email not confirmed')) {
+          errorMessage = 'E-posta adresi doğrulanmamış. Lütfen e-posta kutunuzu kontrol edin.';
+        } else {
+          errorMessage = `Giriş hatası: ${error.message || 'Bilinmeyen hata'}`;
+        }
+        
+        Alert.alert('Hata', errorMessage);
+        setAdminLoading(false);
+        return;
+      }
+
+      // Admin rolünü kontrol et
+      const { data: profile, error: profileError } = await supabase
+        .from('user_profiles')
+        .select('user_type')
+        .eq('user_id', data.user.id)
+        .single();
+
+      if (profileError || !profile) {
+        Alert.alert('Hata', 'Kullanıcı profili bulunamadı');
+        await supabase.auth.signOut(); // Güvenlik için çıkış yap
+        setAdminLoading(false);
+        return;
+      }
+
+      // Admin kontrolü
+      if (profile.user_type !== 'admin') {
+        Alert.alert('Hata', 'Bu hesap admin yetkisine sahip değil');
+        await supabase.auth.signOut(); // Güvenlik için çıkış yap
+        setAdminLoading(false);
+        return;
+      }
+
+      // Admin girişi başarılı - AdminDashboard'a yönlendir
+      // Not: Bu fonksiyon artık modal için değil, direkt AdminLogin ekranına yönlendirme için kullanılıyor
+      // AdminLogin ekranı kendi navigation'ını yapacak
+      setShowAdminLogin(false);
+      setAdminUsername('');
+      setAdminPassword('');
+      
+      // AdminLogin ekranına yönlendir (orada giriş yapıldıktan sonra AdminDashboard'a gidecek)
+      if (navigation && navigation.navigate) {
+        try {
+          const parent = navigation.getParent();
+          if (parent) {
+            parent.navigate('Auth', { screen: 'AdminLogin' });
+          } else {
+            navigation.navigate('AdminLogin');
+          }
+        } catch (error) {
+          navigation.navigate('AdminLogin');
+        }
+      }
+    } catch (error) {
+      console.error('Admin giriş hatası:', error);
+      Alert.alert('Hata', 'Giriş yapılırken bir hata oluştu');
+    } finally {
+      setAdminLoading(false);
+    }
   };
 
   // Kurum sayılarını yükle
@@ -2699,48 +2739,121 @@ export default function LoginScreen({ navigation }) {
 
       if (error) throw error;
 
-      // Kurum durumu kontrolü
-      const { data: institutionCheck, error: institutionError } = await supabase
-        .rpc('check_institution_access', { p_user_id: data.user.id });
+      // Öğretmen kontrolü - Rehber öğretmen veya normal öğretmen olabilir
+      let institutionAccessGranted = false;
+      
+      const { data: teacherData } = await supabase
+        .from('teachers')
+        .select('id')
+        .eq('user_id', data.user.id)
+        .maybeSingle();
 
-      // Bireysel kullanıcılar için özel kontrol
-      if (institutionCheck !== true) {
-        // Bireysel kullanıcılar kurumunda mı kontrol et
-        const { data: individualInstitution } = await supabase
+      if (teacherData) {
+        // Rehber öğretmen kontrolü
+        const { data: guidanceInstitution } = await supabase
           .from('institutions')
-          .select('id, is_active')
-          .eq('name', 'Bireysel Kullanıcılar')
-          .single();
+          .select('id, is_active, contract_end_date')
+          .eq('guidance_teacher_id', teacherData.id)
+          .eq('is_active', true)
+          .maybeSingle();
 
-        if (individualInstitution) {
-          const { data: membership } = await supabase
-            .from('institution_memberships')
-            .select('is_active')
-            .eq('user_id', data.user.id)
-            .eq('institution_id', individualInstitution.id)
-            .single();
-
-          // Bireysel kullanıcılar kurumunda ve aktif ise girişe izin ver
-          if (membership?.is_active && individualInstitution.is_active) {
-            // Bireysel kullanıcı girişi başarılı
+        if (guidanceInstitution) {
+          // Sözleşme bitiş tarihi kontrolü
+          if (guidanceInstitution.contract_end_date) {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const contractEndDate = new Date(guidanceInstitution.contract_end_date);
+            contractEndDate.setHours(0, 0, 0, 0);
+            
+            if (contractEndDate >= today) {
+              institutionAccessGranted = true;
+            }
           } else {
-            await supabase.auth.signOut();
-            Alert.alert(
-              'Erişim Engellendi',
-              'Kurumunuz şu anda pasif durumda. Lütfen kurum yöneticiniz ile iletişime geçin.',
-              [{ text: 'Tamam' }]
-            );
-            return;
+            institutionAccessGranted = true;
           }
         } else {
-          await supabase.auth.signOut();
-          Alert.alert(
-            'Erişim Engellendi',
-            'Kurumunuz şu anda pasif durumda. Lütfen kurum yöneticiniz ile iletişime geçin.',
-            [{ text: 'Tamam' }]
-          );
-          return;
+          // Normal öğretmen - institution_memberships'te tüm aktif kurumları kontrol et
+          // Bir öğretmen birden fazla kurumda görev alabilir
+          const { data: memberships } = await supabase
+            .from('institution_memberships')
+            .select('institution_id, is_active')
+            .eq('user_id', data.user.id)
+            .eq('is_active', true);
+
+          if (memberships && memberships.length > 0) {
+            // Tüm aktif kurumları kontrol et - en az biri aktif ve geçerli olmalı
+            for (const membership of memberships) {
+              if (membership.is_active) {
+                // Kurum bilgilerini al
+                const { data: institution } = await supabase
+                  .from('institutions')
+                  .select('id, is_active, contract_end_date')
+                  .eq('id', membership.institution_id)
+                  .maybeSingle();
+
+                if (institution && institution.is_active) {
+                  // Sözleşme bitiş tarihi kontrolü
+                  let contractValid = true;
+                  if (institution.contract_end_date) {
+                    const today = new Date();
+                    today.setHours(0, 0, 0, 0);
+                    const contractEndDate = new Date(institution.contract_end_date);
+                    contractEndDate.setHours(0, 0, 0, 0);
+                    contractValid = contractEndDate >= today;
+                  }
+
+                  if (contractValid) {
+                    institutionAccessGranted = true;
+                    break; // En az bir geçerli kurum bulundu, yeterli
+                  }
+                }
+              }
+            }
+          }
         }
+      }
+
+      // Öğretmen değilse, check_institution_access fonksiyonunu kullan (premium kontrolü)
+      if (!institutionAccessGranted) {
+        const { data: institutionCheck } = await supabase
+          .rpc('check_institution_access', { p_user_id: data.user.id });
+
+        // Premium kontrolü - true ise girişe izin ver
+        if (institutionCheck === true) {
+          institutionAccessGranted = true;
+        } else {
+          // Bireysel kullanıcılar için özel kontrol
+          const { data: individualInstitution } = await supabase
+            .from('institutions')
+            .select('id, is_active')
+            .eq('name', 'Bireysel Kullanıcılar')
+            .single();
+
+          if (individualInstitution) {
+            const { data: membership } = await supabase
+              .from('institution_memberships')
+              .select('is_active')
+              .eq('user_id', data.user.id)
+              .eq('institution_id', individualInstitution.id)
+              .single();
+
+            // Bireysel kullanıcılar kurumunda ve aktif ise girişe izin ver
+            if (membership?.is_active && individualInstitution.is_active) {
+              institutionAccessGranted = true;
+            }
+          }
+        }
+      }
+
+      // Eğer hiçbir kuruma erişim yoksa girişi engelle
+      if (!institutionAccessGranted) {
+        await supabase.auth.signOut();
+        Alert.alert(
+          'Erişim Engellendi',
+          'Kurumunuz şu anda pasif durumda.\n\nGiriş yapabilmek için lütfen sistem yöneticiniz ile iletişime geçin.',
+          [{ text: 'Tamam' }]
+        );
+        return;
       }
 
       // Başarılı giriş - reklam gösterilmiyor (öğretmen/premium kontrolü)
@@ -2854,7 +2967,11 @@ export default function LoginScreen({ navigation }) {
 
             <Button
               title="🏢 Kurum Girişi"
-              onPress={() => setShowInstitutionAdminLogin(true)}
+              onPress={() => {
+                if (navigation && navigation.navigate) {
+                  navigation.navigate('InstitutionAdminLogin');
+                }
+              }}
               variant="outline"
               icon={<Ionicons name="business-outline" size={20} color={colors.primary} />}
               style={styles.institutionAdminButton}
@@ -2883,10 +3000,14 @@ export default function LoginScreen({ navigation }) {
             <Text style={styles.modalSubtitle}>Admin paneline erişmek için giriş yapın</Text>
             
             <Input
-              label="Kullanıcı Adı"
+              label="E-posta Adresi"
               value={adminUsername}
               onChangeText={setAdminUsername}
-              placeholder="Kullanıcı adınızı girin"
+              placeholder="admin@verimly.com"
+              keyboardType="email-address"
+              autoCapitalize="none"
+              autoCorrect={false}
+              autoComplete="email"
               style={styles.modalInput}
             />
             
@@ -3083,314 +3204,7 @@ export default function LoginScreen({ navigation }) {
       </Modal>
 
 
-      {/* Admin Dashboard Modal */}
-      <Modal
-        visible={showAdminDashboard}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => setShowAdminDashboard(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>🔧 Admin Panel</Text>
-            <Text style={styles.modalSubtitle}>Sistem yönetimi</Text>
-            
-            <View style={styles.adminButtons}>
-              <Button
-                title="📊 Raporlar & İstatistikler"
-                onPress={() => {
-                  setShowAdminDashboard(false);
-                  setShowAdminMainPanel(true);
-                  loadAdminStats();
-                }}
-                style={[styles.adminButton, { backgroundColor: '#9C27B0' }]}
-              />
-              
-              <Button
-                title="🏢 Kurum Yönetimi"
-                onPress={() => {
-                  setShowAdminDashboard(false);
-                  setShowAdminInstitutions(true);
-                }}
-                style={[styles.adminButton, { backgroundColor: '#FF9800' }]}
-              />
-              
-              <Button
-                title="❌ Kapat"
-                onPress={() => setShowAdminDashboard(false)}
-                variant="ghost"
-                style={styles.adminButton}
-              />
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      {/* Admin Teachers Modal */}
-      <Modal
-        visible={showAdminTeachers}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => {
-          setShowAdminTeachers(false);
-          setTeachers([]);
-        }}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { maxHeight: '80%' }]}>
-            <Text style={styles.modalTitle}>👥 Öğretmen Yönetimi</Text>
-            <Text style={styles.modalSubtitle}>Kayıtlı öğretmenler ({teachers.length})</Text>
-            
-            <View style={styles.adminButtons}>
-              <Button
-                title="👥 Öğretmenleri Görüntüle"
-                onPress={loadTeachers}
-                loading={loadingTeachers}
-                style={[styles.adminButton, { backgroundColor: '#2196F3' }]}
-              />
-            </View>
-
-            {loadingTeachers ? (
-              <View style={styles.loadingContainer}>
-                <ActivityIndicator size="large" color={colors.primary} />
-                <Text style={styles.loadingText}>Öğretmenler yükleniyor...</Text>
-              </View>
-            ) : teachers.length > 0 ? (
-              <>
-                <FlatList
-                data={teachers}
-                keyExtractor={(item) => item.user_id.toString()}
-                renderItem={({ item }) => (
-                  <View style={styles.teacherCard}>
-                    <View style={styles.teacherInfo}>
-                      <Text style={styles.teacherName}>{item.name || 'İsimsiz Öğretmen'}</Text>
-                      <Text style={styles.teacherEmail}>{item.email || 'E-posta yok'}</Text>
-                      <Text style={styles.teacherDate}>
-                        Kayıt: {new Date(item.created_at).toLocaleDateString('tr-TR')}
-                      </Text>
-                    </View>
-                    <View style={styles.teacherActions}>
-                      <TouchableOpacity 
-                        style={styles.actionButton}
-                        onPress={() => {
-                          Alert.alert(
-                            'Şifre Sıfırla',
-                            `${item.name} öğretmeninin şifresini sıfırlamak istiyor musunuz?\n\nYeni şifre: teacher123`,
-                            [
-                              { text: 'İptal', style: 'cancel' },
-                              { 
-                                text: 'Sıfırla', 
-                                style: 'destructive',
-                                onPress: () => resetTeacherPassword(item.user_id, item.name, item.email)
-                              }
-                            ]
-                          );
-                        }}
-                      >
-                        <Ionicons name="key-outline" size={20} color="#FF9800" />
-                      </TouchableOpacity>
-                      <TouchableOpacity 
-                        style={styles.actionButton}
-                        onPress={() => Alert.alert('Bilgi', 'Öğretmen silme özelliği yakında eklenecek!')}
-                      >
-                        <Ionicons name="trash-outline" size={20} color="#F44336" />
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                )}
-                style={styles.teachersList}
-                showsVerticalScrollIndicator={false}
-                ListEmptyComponent={
-                  <View style={styles.emptyContainer}>
-                    <Text style={styles.emptyText}>Henüz öğretmen kaydı yok</Text>
-                    <Text style={styles.emptySubtext}>İlk öğretmeni eklemek için "Yeni Öğretmen Ekle" butonunu kullanın</Text>
-                  </View>
-                }
-              />
-              </>
-            ) : (
-              <View style={styles.emptyContainer}>
-                <Text style={styles.emptyText}>Öğretmenleri görüntülemek için</Text>
-                <Text style={styles.emptySubtext}>"Öğretmenleri Görüntüle" butonuna tıklayın</Text>
-              </View>
-            )}
-            
-            <Button
-              title="⬅️ Geri"
-              onPress={() => {
-                setShowAdminTeachers(false);
-                setShowAdminDashboard(true);
-                // Geri butonuna basıldığında öğretmen listesini temizle
-                setTeachers([]);
-              }}
-              variant="ghost"
-              style={styles.adminButton}
-            />
-          </View>
-        </View>
-      </Modal>
-
-      {/* Admin Students Modal */}
-      <Modal
-        visible={showAdminStudents}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => {
-          setShowAdminStudents(false);
-          setStudents([]);
-        }}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { maxHeight: '80%' }]}>
-            <Text style={styles.modalTitle}>🎓 Öğrenci Yönetimi</Text>
-            
-            <View style={styles.adminButtons}>
-              <Button
-                title="👥 Öğrencileri Görüntüle"
-                onPress={loadStudents}
-                loading={loadingStudents}
-                style={[styles.adminButton, { backgroundColor: '#2196F3' }]}
-              />
-            </View>
-
-            {loadingStudents ? (
-              <View style={styles.loadingContainer}>
-                <ActivityIndicator size="large" color={colors.primary} />
-                <Text style={styles.loadingText}>Öğrenciler yükleniyor...</Text>
-              </View>
-            ) : students.length > 0 ? (
-              <>
-                <Text style={styles.modalSubtitle}>Kayıtlı öğrenciler ({students.length})</Text>
-                <FlatList
-                  data={students}
-                  keyExtractor={(item) => item.user_id.toString()}
-                  renderItem={({ item }) => (
-                  <View style={styles.studentCard}>
-                    <View style={styles.studentInfo}>
-                      <Text style={styles.studentName}>{item.name || 'İsimsiz Öğrenci'}</Text>
-                      <Text style={styles.studentEmail}>{item.email || 'E-posta yok'}</Text>
-                      <Text style={styles.studentDate}>
-                        Kayıt: {new Date(item.created_at).toLocaleDateString('tr-TR')}
-                      </Text>
-                    </View>
-                    <View style={styles.studentActions}>
-                      <TouchableOpacity 
-                        style={styles.actionButton}
-                        onPress={() => {
-                          Alert.alert(
-                            'Şifre Sıfırla',
-                            `${item.name} öğrencisinin şifresini sıfırlamak istiyor musunuz?\n\nYeni şifre: student123`,
-                            [
-                              { text: 'İptal', style: 'cancel' },
-                              { 
-                                text: 'Sıfırla', 
-                                style: 'destructive',
-                                onPress: () => resetStudentPassword(item.user_id, item.name, item.email)
-                              }
-                            ]
-                          );
-                        }}
-                      >
-                        <Ionicons name="key-outline" size={20} color="#FF9800" />
-                      </TouchableOpacity>
-                      <TouchableOpacity 
-                        style={styles.actionButton}
-                        onPress={() => Alert.alert('Bilgi', 'Öğrenci silme özelliği yakında eklenecek!')}
-                      >
-                        <Ionicons name="trash-outline" size={20} color="#F44336" />
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                )}
-                style={styles.studentsList}
-                showsVerticalScrollIndicator={false}
-                ListEmptyComponent={
-                  <View style={styles.emptyContainer}>
-                    <Text style={styles.emptyText}>Henüz öğrenci kaydı yok</Text>
-                    <Text style={styles.emptySubtext}>İlk öğrenciyi eklemek için "Yeni Öğrenci Ekle" butonunu kullanın</Text>
-                  </View>
-                }
-              />
-              </>
-            ) : (
-              <View style={styles.emptyContainer}>
-                <Text style={styles.emptyText}>Öğrencileri görüntülemek için</Text>
-                <Text style={styles.emptySubtext}>"Öğrencileri Görüntüle" butonuna tıklayın</Text>
-              </View>
-            )}
-            
-            <Button
-              title="⬅️ Geri"
-              onPress={() => {
-                setShowAdminStudents(false);
-                setShowAdminDashboard(true);
-                // Geri butonuna basıldığında öğrenci listesini temizle
-                setStudents([]);
-              }}
-              variant="ghost"
-              style={styles.adminButton}
-            />
-          </View>
-        </View>
-      </Modal>
-
-
-
-      {/* Admin Institutions Modal */}
-      <Modal
-        visible={showAdminInstitutions}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => setShowAdminInstitutions(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>🏢 Kurum Yönetimi</Text>
-            <Text style={styles.modalSubtitle}>Kurum ekle, düzenle, sözleşme takibi</Text>
-            
-            <View style={styles.adminButtons}>
-              <Button
-                title="➕ Yeni Kurum Ekle"
-                onPress={() => {
-                  setShowAdminInstitutions(false);
-                  setShowAddInstitution(true);
-                }}
-                style={[styles.adminButton, { backgroundColor: '#4CAF50' }]}
-              />
-              
-              <Button
-                title="📋 Kurum Listesi"
-                onPress={() => {
-                  setShowAdminInstitutions(false);
-                  setShowInstitutionList(true);
-                  loadInstitutions();
-                }}
-                style={[styles.adminButton, { backgroundColor: '#2196F3' }]}
-              />
-              
-              <Button
-                title="📊 Sözleşme Takibi"
-                onPress={() => {
-                  setShowAdminInstitutions(false);
-                  setShowContractManagement(true);
-                  loadInstitutions();
-                }}
-                style={[styles.adminButton, { backgroundColor: '#FF9800' }]}
-              />
-              
-              <Button
-                title="⬅️ Geri"
-                onPress={() => {
-                  setShowAdminInstitutions(false);
-                  setShowAdminDashboard(true);
-                }}
-                variant="ghost"
-                style={styles.adminButton}
-              />
-            </View>
-          </View>
-        </View>
-      </Modal>
+      {/* Eski Ana Admin Modal'ları Kaldırıldı - Artık AdminDashboardScreen kullanılıyor */}
 
       {/* Add Institution Modal */}
       <Modal
@@ -3495,7 +3309,6 @@ export default function LoginScreen({ navigation }) {
                 title="İptal"
                 onPress={() => {
                   setShowAddInstitution(false);
-                  setShowAdminInstitutions(true);
                 }}
                 variant="ghost"
                 style={styles.modalButton}
@@ -3576,7 +3389,6 @@ export default function LoginScreen({ navigation }) {
                 title="⬅️ Geri"
                 onPress={() => {
                   setShowInstitutionList(false);
-                  setShowAdminInstitutions(true);
                 }}
                 variant="ghost"
                 style={styles.modalButton}
@@ -3691,7 +3503,6 @@ export default function LoginScreen({ navigation }) {
                 title="⬅️ Geri"
                 onPress={() => {
                   setShowContractManagement(false);
-                  setShowAdminInstitutions(true);
                 }}
                 variant="ghost"
                 style={styles.modalButton}
@@ -3799,352 +3610,7 @@ export default function LoginScreen({ navigation }) {
         </View>
       </Modal>
 
-      {/* Admin Main Panel Modal - Dashboard */}
-      <Modal
-        visible={showAdminMainPanel}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => setShowAdminMainPanel(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { maxHeight: '90%', width: '95%', maxWidth: 600 }]}>
-            <Text style={styles.modalTitle}>📊 Raporlar & İstatistikler</Text>
-            <Text style={styles.modalSubtitle}>Sistem genel durumu</Text>
-            
-            <ScrollView style={styles.modalScrollView} showsVerticalScrollIndicator={false}>
-              {loadingAdminStats ? (
-                <View style={styles.loadingContainer}>
-                  <ActivityIndicator size="large" color={colors.primary} />
-                  <Text style={styles.loadingText}>İstatistikler yükleniyor...</Text>
-                </View>
-              ) : (
-                <>
-                  {/* Genel İstatistikler */}
-                  <View style={styles.statsSection}>
-                    <Text style={styles.statsSectionTitle}>📈 Genel İstatistikler</Text>
-                    
-                    <View style={styles.statsGrid}>
-                      <View style={[styles.statCard, { backgroundColor: '#4CAF50' + '20' }]}>
-                        <Text style={styles.statValue}>{adminStats.totalInstitutions}</Text>
-                        <Text style={styles.statLabel}>Toplam Kurum</Text>
-                      </View>
-                      
-                      <View style={[styles.statCard, { backgroundColor: '#2196F3' + '20' }]}>
-                        <Text style={styles.statValue}>{adminStats.activeInstitutions}</Text>
-                        <Text style={styles.statLabel}>Aktif Kurum</Text>
-                      </View>
-                      
-                      <View style={[styles.statCard, { backgroundColor: '#FF9800' + '20' }]}>
-                        <Text style={styles.statValue}>{adminStats.totalTeachers}</Text>
-                        <Text style={styles.statLabel}>Toplam Öğretmen</Text>
-                      </View>
-                      
-                      <View style={[styles.statCard, { backgroundColor: '#9C27B0' + '20' }]}>
-                        <Text style={styles.statValue}>{adminStats.totalStudents}</Text>
-                        <Text style={styles.statLabel}>Toplam Öğrenci</Text>
-                      </View>
-                      
-                      <View style={[styles.statCard, { backgroundColor: '#00BCD4' + '20' }]}>
-                        <Text style={styles.statValue}>{adminStats.individualUsers}</Text>
-                        <Text style={styles.statLabel}>Bireysel Kullanıcı</Text>
-                      </View>
-                      
-                      <View style={[styles.statCard, { backgroundColor: '#E91E63' + '20' }]}>
-                        <Text style={styles.statValue}>{adminStats.totalConnections}</Text>
-                        <Text style={styles.statLabel}>Aktif Bağlantı</Text>
-                      </View>
-                    </View>
-                  </View>
-
-                  {/* Bireysel Kullanıcılar */}
-                  {adminStats.individualUsers > 0 && (
-                    <View style={styles.statsSection}>
-                      <Text style={styles.statsSectionTitle}>👤 Bireysel Kullanıcılar</Text>
-                      
-                      <View style={styles.individualUsersCard}>
-                        <View style={styles.individualUsersHeader}>
-                          <Ionicons name="person-outline" size={24} color={colors.primary} />
-                          <Text style={styles.individualUsersTitle}>Bireysel Kullanıcılar</Text>
-                        </View>
-                        <View style={styles.individualUsersContent}>
-                          <Text style={styles.individualUsersCount}>{adminStats.individualUsers}</Text>
-                          <Text style={styles.individualUsersLabel}>Toplam Bireysel Kullanıcı</Text>
-                        </View>
-                        <Text style={styles.individualUsersDescription}>
-                          Play Store/App Store üzerinden kayıt olan bireysel kullanıcılar
-                        </Text>
-                      </View>
-                    </View>
-                  )}
-
-                  {/* Kurum Bazlı İstatistikler */}
-                  <View style={styles.statsSection}>
-                    <Text style={styles.statsSectionTitle}>🏢 Kurum Bazlı Detaylar</Text>
-                    
-                    {institutionStats.length > 0 ? (
-                      institutionStats
-                        .map((inst) => (
-                        <TouchableOpacity 
-                          key={inst.id} 
-                          style={styles.institutionStatCard}
-                          onPress={() => {
-                            if (!inst.id) {
-                              Alert.alert('Hata', 'Geçersiz kurum ID');
-                              return;
-                            }
-                            setSelectedInstitution(inst);
-                            setShowInstitutionDetails(true);
-                            loadInstitutionDetails(inst.id);
-                          }}
-                          activeOpacity={0.7}
-                        >
-                          <View style={styles.institutionStatHeader}>
-                            <Text style={styles.institutionStatName}>{inst.name}</Text>
-                            <View style={styles.institutionStatBadges}>
-                              {inst.is_active && (
-                                <View style={[styles.badge, { backgroundColor: '#4CAF50' }]}>
-                                  <Text style={styles.badgeText}>Aktif</Text>
-                                </View>
-                              )}
-                              {inst.is_premium && (
-                                <View style={[styles.badge, { backgroundColor: '#FF9800' }]}>
-                                  <Text style={styles.badgeText}>Premium</Text>
-                                </View>
-                              )}
-                            </View>
-                          </View>
-                          
-                          <View style={styles.institutionStatDetails}>
-                            <View style={styles.institutionStatItem}>
-                              <Ionicons name="people-outline" size={16} color={colors.primary} />
-                              <Text style={styles.institutionStatText}>
-                                {inst.teacher_count} Öğretmen
-                              </Text>
-                            </View>
-                            <View style={styles.institutionStatItem}>
-                              <Ionicons name="school-outline" size={16} color={colors.primary} />
-                              <Text style={styles.institutionStatText}>
-                                {inst.student_count} Öğrenci
-                              </Text>
-                            </View>
-                          </View>
-                          
-                          <View style={styles.institutionStatFooter}>
-                            <Text style={styles.institutionStatFooterText}>
-                              Detayları görmek için tıklayın
-                            </Text>
-                            <Ionicons name="chevron-forward" size={16} color={colors.textSecondary} />
-                          </View>
-                        </TouchableOpacity>
-                      ))
-                    ) : (
-                      <View style={styles.emptyContainer}>
-                        <Text style={styles.emptyText}>Henüz kurum eklenmemiş</Text>
-                      </View>
-                    )}
-                  </View>
-                </>
-              )}
-            </ScrollView>
-            
-            <View style={styles.modalButtons}>
-              <Button
-                title="⬅️ Geri"
-                onPress={() => {
-                  setShowAdminMainPanel(false);
-                  setShowAdminDashboard(true);
-                }}
-                variant="ghost"
-                style={styles.modalButton}
-              />
-              <Button
-                title="🔄 Yenile"
-                onPress={() => {
-                  loadAdminStats();
-                }}
-                style={[styles.modalButton, { backgroundColor: '#2196F3' }]}
-              />
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      {/* Kurum Detayları Modal */}
-      <Modal
-        visible={showInstitutionDetails}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => setShowInstitutionDetails(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { maxHeight: '90%', width: '95%', maxWidth: 600 }]}>
-            <Text style={styles.modalTitle}>🏢 {selectedInstitution?.name}</Text>
-            <Text style={styles.modalSubtitle}>Kurum detayları ve üyeleri</Text>
-            
-            <ScrollView style={styles.modalScrollView} showsVerticalScrollIndicator={false}>
-              {loadingInstitutionDetails ? (
-                <View style={styles.loadingContainer}>
-                  <ActivityIndicator size="large" color={colors.primary} />
-                  <Text style={styles.loadingText}>Kurum detayları yükleniyor...</Text>
-                </View>
-              ) : (
-                <>
-                  {/* Öğretmenler */}
-                  <View style={styles.detailsSection}>
-                    <Text style={styles.detailsSectionTitle}>
-                      👥 Öğretmenler ({institutionTeachers.length})
-                    </Text>
-                    
-                    {institutionTeachers.length > 0 ? (
-                      institutionTeachers.map((teacher, index) => (
-                        <View key={`${teacher.user_id || teacher.id || index}`} style={styles.detailCard}>
-                          <View style={styles.detailCardHeader}>
-                            <View style={styles.detailCardInfo}>
-                              <Text style={styles.detailCardName}>{teacher.name}</Text>
-                              <Text style={styles.detailCardBranch}>{teacher.branch}</Text>
-                            </View>
-                            <View style={styles.detailCardActions}>
-                              <TouchableOpacity 
-                                style={styles.detailActionButton}
-                                onPress={() => resetUserPassword(teacher)}
-                              >
-                                <Ionicons name="key-outline" size={18} color={colors.warning || "#FF9800"} />
-                              </TouchableOpacity>
-                              <TouchableOpacity 
-                                style={styles.detailActionButton}
-                                onPress={() => openMoveUserModal(teacher)}
-                              >
-                                <Ionicons name="swap-horizontal" size={18} color={colors.primary} />
-                              </TouchableOpacity>
-                              <TouchableOpacity 
-                                style={styles.detailActionButton}
-                                onPress={() => deleteUser(teacher)}
-                              >
-                                <Ionicons name="trash-outline" size={18} color="#F44336" />
-                              </TouchableOpacity>
-                            </View>
-                          </View>
-                        </View>
-                      ))
-                    ) : (
-                      <View style={styles.emptyContainer}>
-                        <Text style={styles.emptyText}>Bu kurumda henüz öğretmen yok</Text>
-                      </View>
-                    )}
-                  </View>
-
-                  {/* Öğrenciler */}
-                  <View style={styles.detailsSection}>
-                    <Text style={styles.detailsSectionTitle}>
-                      🎓 Öğrenciler ({institutionStudents.length})
-                    </Text>
-                    
-                    {institutionStudents.length > 0 ? (
-                      institutionStudents.map((student, index) => (
-                        <View key={`${student.user_id || student.id || index}`} style={styles.detailCard}>
-                          <View style={styles.detailCardHeader}>
-                            <View style={styles.detailCardInfo}>
-                              <Text style={styles.detailCardName}>{student.name}</Text>
-                              <Text style={styles.detailCardGrade}>
-                                {student.grade || 'Belirtilmemiş'}{student.email ? ` - ${student.email}` : ''}
-                              </Text>
-                            </View>
-                            <View style={styles.detailCardActions}>
-                              <TouchableOpacity 
-                                style={styles.detailActionButton}
-                                onPress={() => resetUserPassword(student)}
-                              >
-                                <Ionicons name="key-outline" size={18} color={colors.warning || "#FF9800"} />
-                              </TouchableOpacity>
-                              <TouchableOpacity 
-                                style={styles.detailActionButton}
-                                onPress={() => openMoveUserModal(student)}
-                              >
-                                <Ionicons name="swap-horizontal" size={18} color={colors.primary} />
-                              </TouchableOpacity>
-                              <TouchableOpacity 
-                                style={styles.detailActionButton}
-                                onPress={() => deleteUser(student)}
-                              >
-                                <Ionicons name="trash-outline" size={18} color="#F44336" />
-                              </TouchableOpacity>
-                            </View>
-                          </View>
-                        </View>
-                      ))
-                    ) : (
-                      <View style={styles.emptyContainer}>
-                        <Text style={styles.emptyText}>Bu kurumda henüz öğrenci yok</Text>
-                      </View>
-                    )}
-                  </View>
-                </>
-              )}
-            </ScrollView>
-            
-            <View style={styles.modalButtons}>
-              <Button
-                title="⬅️ Geri"
-                onPress={() => setShowInstitutionDetails(false)}
-                variant="ghost"
-                style={styles.modalButton}
-              />
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      {/* Kullanıcı Taşıma Modal */}
-      <Modal
-        visible={showMoveUserModal}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => setShowMoveUserModal(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { maxHeight: '80%', width: '95%', maxWidth: 500 }]}>
-            <Text style={styles.modalTitle}>🔄 Kullanıcı Taşı</Text>
-            <Text style={styles.modalSubtitle}>
-              {selectedUser?.name} kullanıcısını hangi kuruma taşımak istiyorsunuz?
-            </Text>
-            
-            <ScrollView style={styles.modalScrollView} showsVerticalScrollIndicator={false}>
-              {availableInstitutions.length > 0 ? (
-                availableInstitutions.map((institution) => (
-                  <TouchableOpacity
-                    key={institution.id}
-                    style={styles.institutionOption}
-                    onPress={() => moveUserToInstitution(institution.id)}
-                    disabled={loadingMoveUser}
-                  >
-                    <View style={styles.institutionOptionContent}>
-                      <Ionicons name="business-outline" size={24} color={colors.primary} />
-                      <Text style={styles.institutionOptionName}>{institution.name}</Text>
-                    </View>
-                    <Ionicons name="arrow-forward" size={20} color={colors.textSecondary} />
-                  </TouchableOpacity>
-                ))
-              ) : (
-                <View style={styles.emptyContainer}>
-                  <Text style={styles.emptyText}>Taşınabilir kurum bulunamadı</Text>
-                </View>
-              )}
-            </ScrollView>
-            
-            <View style={styles.modalButtons}>
-              <Button
-                title="❌ İptal"
-                onPress={() => {
-                  setShowMoveUserModal(false);
-                  setSelectedUser(null);
-                }}
-                variant="ghost"
-                style={styles.modalButton}
-              />
-            </View>
-          </View>
-        </View>
-      </Modal>
+      {/* Eski Ana Admin Modal'ları (Admin Main Panel, Kurum Detayları, Kullanıcı Taşıma) Kaldırıldı - Artık AdminDashboardScreen kullanılıyor */}
 
       {/* Edit Institution Modal */}
       <Modal

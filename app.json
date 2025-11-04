@@ -21,7 +21,8 @@
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSCameraUsageDescription": "Profil fotoğrafı için kamera erişimi",
-        "NSPhotoLibraryUsageDescription": "Profil fotoğrafı için fotoğraf galerisi erişimi"
+        "NSPhotoLibraryUsageDescription": "Profil fotoğrafı için fotoğraf galerisi erişimi",
+        "NSPhotoLibraryAddUsageDescription": "Çalışma özetlerini galeriye kaydetmek için fotoğraf galerisi erişimi gerektirir."
       },
       "appStoreUrl": "https://apps.apple.com/app/verimly/id123456789"
     },
@@ -33,8 +34,22 @@
       "edgeToEdgeEnabled": true,
       "package": "com.verimly.app",
       "versionCode": 1,
-      "playStoreUrl": "https://play.google.com/store/apps/details?id=com.verimly.app"
+      "playStoreUrl": "https://play.google.com/store/apps/details?id=com.verimly.app",
+      "permissions": [
+        "READ_MEDIA_IMAGES"
+      ]
     },
+    "plugins": [
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Uygulama, çalışma özetlerini galeriye kaydetmek için fotoğraf galerisi erişimi gerektirir.",
+          "savePhotosPermission": "Uygulama, çalışma özetlerini galeriye kaydetmek için fotoğraf kaydetme izni gerektirir.",
+          "isAccessMediaLocationEnabled": false,
+          "audioPermission": false
+        }
+      ]
+    ],
     "web": {
       "favicon": "./assets/favicon.png"
     },

@@ -17,6 +17,7 @@ import Container from '../components/Container';
 import Card from '../components/Card';
 import Input from '../components/Input';
 import Button from '../components/Button';
+import { supabase } from '../lib/supabase';
 
 const AdminLoginScreen = ({ navigation }) => {
   const { isDark } = useTheme();
@@ -24,38 +25,87 @@ const AdminLoginScreen = ({ navigation }) => {
   const styles = createStyles(colors);
 
   const [credentials, setCredentials] = useState({
-    username: 'admin',
-    password: 'admin123',
+    username: '', // E-posta formatında
+    password: '',
   });
   const [loading, setLoading] = useState(false);
 
   const handleLogin = async () => {
     if (!credentials.username.trim() || !credentials.password.trim()) {
-      Alert.alert('Hata', 'Kullanıcı adı ve şifre gereklidir');
+      Alert.alert('Hata', 'E-posta ve şifre gereklidir');
       return;
     }
 
     setLoading(true);
     try {
-      // Admin kimlik doğrulama (basit versiyon)
-      // Gerçek uygulamada güvenli bir admin sistemi kullanılmalı
-      if (credentials.username === 'admin' && credentials.password === 'admin123') {
-        Alert.alert(
-          'Giriş Başarılı! 🎉',
-          'Admin paneline yönlendiriliyorsunuz...',
-          [
-            {
-              text: 'Tamam',
-              onPress: () => navigation.navigate('AdminDashboard'),
-            },
-          ]
-        );
-      } else {
-        Alert.alert('Hata', 'Geçersiz kullanıcı adı veya şifre');
+      // Supabase Auth ile giriş yap
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: credentials.username.trim(), // E-posta formatında bekleniyor
+        password: credentials.password
+      });
+
+      if (error) {
+        console.error('Admin giriş hatası:', error);
+        let errorMessage = 'Geçersiz giriş bilgileri';
+        
+        if (error.message?.includes('Invalid login credentials') || error.message?.includes('invalid_credentials')) {
+          errorMessage = 'E-posta veya şifre hatalı. Lütfen bilgilerinizi kontrol edin.\n\nAdmin kullanıcısı oluşturulmamışsa, create_admin_user.js script\'ini çalıştırmanız gerekebilir.';
+        } else if (error.message?.includes('Email not confirmed')) {
+          errorMessage = 'E-posta adresi doğrulanmamış. Lütfen e-posta kutunuzu kontrol edin.';
+        } else {
+          errorMessage = `Giriş hatası: ${error.message || 'Bilinmeyen hata'}`;
+        }
+        
+        Alert.alert('Hata', errorMessage);
+        setLoading(false);
+        return;
       }
+
+      // Admin rolünü kontrol et
+      const { data: profile, error: profileError } = await supabase
+        .from('user_profiles')
+        .select('user_type')
+        .eq('user_id', data.user.id)
+        .single();
+
+      if (profileError || !profile) {
+        Alert.alert('Hata', 'Kullanıcı profili bulunamadı');
+        await supabase.auth.signOut(); // Güvenlik için çıkış yap
+        setLoading(false);
+        return;
+      }
+
+      // Admin kontrolü
+      if (profile.user_type !== 'admin') {
+        Alert.alert('Hata', 'Bu hesap admin yetkisine sahip değil');
+        await supabase.auth.signOut(); // Güvenlik için çıkış yap
+        setLoading(false);
+        return;
+      }
+
+      // Admin girişi başarılı - direkt navigate et
+      // setTimeout ile biraz geciktir (state güncellemeleri için)
+      setTimeout(() => {
+        if (navigation && navigation.navigate) {
+          // Önce parent navigator kontrolü yap
+          try {
+            const parent = navigation.getParent();
+            if (parent) {
+              // Parent varsa parent üzerinden navigate et
+              parent.navigate('AdminDashboard');
+            } else {
+              // Parent yoksa direkt navigate et
+              navigation.navigate('AdminDashboard');
+            }
+          } catch (error) {
+            // getParent() çalışmadıysa direkt navigate dene
+            navigation.navigate('AdminDashboard');
+          }
+        }
+      }, 100);
     } catch (error) {
       console.error('Admin giriş hatası:', error);
-      Alert.alert('Hata', 'Giriş yapılamadı');
+      Alert.alert('Hata', 'Giriş yapılırken bir hata oluştu');
     } finally {
       setLoading(false);
     }
@@ -77,14 +127,14 @@ const AdminLoginScreen = ({ navigation }) => {
           <Text style={styles.loginTitle}>Giriş Yap</Text>
           
           <Input
-            placeholder="Kullanıcı Adı"
+            placeholder="E-posta Adresi"
             value={credentials.username}
             onChangeText={(text) => setCredentials({ ...credentials, username: text })}
             style={styles.input}
             autoCapitalize="none"
             autoCorrect={false}
-            autoComplete="off"
-            defaultValue="admin"
+            autoComplete="email"
+            keyboardType="email-address"
           />
           
           <Input
@@ -93,8 +143,7 @@ const AdminLoginScreen = ({ navigation }) => {
             onChangeText={(text) => setCredentials({ ...credentials, password: text })}
             secureTextEntry
             style={styles.input}
-            autoComplete="off"
-            defaultValue="admin123"
+            autoComplete="password"
           />
 
           <Button
