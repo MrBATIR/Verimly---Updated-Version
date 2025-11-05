@@ -10,8 +10,9 @@ import Card from '../components/Card';
 import Button from '../components/Button';
 import Input from '../components/Input';
 import { StudyDetailModal } from '../components';
-import { supabase, supabaseAdmin } from '../lib/supabase';
+import { supabase } from '../lib/supabase';
 import * as teacherApi from '../lib/teacherApi';
+import { getGuidanceTeacherStudyLogs, getGuidanceTeacherStudents, getGuidanceTeacherStudentPlans, deleteGuidanceTeacherStudentPlans } from '../lib/adminApi';
 
 // ActivityCard Component
 const ActivityCard = ({ activity, onPress }) => {
@@ -268,12 +269,38 @@ const TeacherHomeScreen = ({ navigation }) => {
       }
 
       // Öğrenci profil verilerini al
-      const queryClient = isGuidanceTeacherLocal ? supabaseAdmin : supabase;
+      // Rehber öğretmen için Edge Function kullan, normal öğretmen için normal supabase
+      let studentProfiles = [];
+      let profileError = null;
       
-      const { data: studentProfiles, error: profileError } = await queryClient
-        .from('user_profiles')
-        .select('user_id, name, email, selected_avatar')
-        .in('user_id', studentIds);
+      if (isGuidanceTeacherLocal && institutionData) {
+        // Rehber öğretmen - Edge Function ile öğrencileri getir
+        const result = await getGuidanceTeacherStudents(institutionData.id);
+        
+        if (result.error) {
+          console.error('Rehber öğretmen öğrencileri yüklenirken hata:', result.error);
+          profileError = result.error;
+        } else {
+          const studentsData = result.data?.data || result.data || [];
+          // Edge Function'dan gelen öğrenci verilerini user_profiles formatına çevir
+          // Edge Function artık user_id alanını da döndürüyor (institution_memberships'ten)
+          studentProfiles = studentsData.map(student => ({
+            user_id: student.user_id || student.id, // user_id artık direkt geliyor
+            name: student.name || 'İsimsiz Öğrenci',
+            email: student.email || '',
+            selected_avatar: null, // Edge Function'dan avatar bilgisi gelmiyor, gerekirse eklenebilir
+          }));
+        }
+      } else {
+        // Normal öğretmen - Normal supabase kullan
+        const { data, error } = await supabase
+          .from('user_profiles')
+          .select('user_id, name, email, selected_avatar')
+          .in('user_id', studentIds);
+        
+        studentProfiles = data || [];
+        profileError = error;
+      }
 
       if (profileError) {
         console.error('Öğrenci profilleri yüklenirken hata:', profileError);
@@ -349,70 +376,90 @@ const TeacherHomeScreen = ({ navigation }) => {
         setIsGuidanceTeacher(true);
       }
 
-      // Rehber öğretmen ise supabaseAdmin kullan
-      const queryClient = isGuidanceTeacherLocal ? supabaseAdmin : supabase;
-
-      // Günlük planları al
-      const { data: dailyPlans, error: dailyError } = await queryClient
-        .from('student_daily_plans')
-        .select('*')
-        .eq('student_id', studentId)
-        .order('plan_date', { ascending: false });
-
-      if (dailyError) {
-        console.error('Günlük planlar yüklenirken hata:', dailyError);
-      }
-
-      // Haftalık planları al
-      const { data: weeklyPlans, error: weeklyError } = await queryClient
-        .from('student_weekly_plans')
-        .select('*')
-        .eq('student_id', studentId)
-        .order('week_start_date', { ascending: false });
-
-      if (weeklyError) {
-        console.error('Haftalık planlar yüklenirken hata:', weeklyError);
-      }
-
-      // Rehber öğretmen kontrolü - Planları yükledikten sonra her plan için rehber öğretmen kontrolü yap
-      const enrichedDailyPlans = await Promise.all((dailyPlans || []).map(async (plan) => {
-        if (plan.teacher_id) {
-          const { data: guidanceInstitution } = await supabase
-            .from('institutions')
-            .select('id')
-            .eq('guidance_teacher_id', plan.teacher_id)
-            .eq('is_active', true)
-            .maybeSingle();
-          
-          return {
-            ...plan,
-            isGuidanceTeacher: !!guidanceInstitution
-          };
+      // Planları al - Rehber öğretmen için Edge Function kullan
+      if (isGuidanceTeacherLocal && institutionData) {
+        // Rehber öğretmen - Edge Function kullan
+        const result = await getGuidanceTeacherStudentPlans(studentId, institutionData.id);
+        
+        if (result.error) {
+          console.error('Rehber öğretmen planları yüklenirken hata:', result.error);
+          setStudentPlans({
+            daily: [],
+            weekly: []
+          });
+        } else {
+          const plansData = result.data?.data || result.data || { daily: [], weekly: [] };
+          setStudentPlans({
+            daily: plansData.daily || [],
+            weekly: plansData.weekly || []
+          });
         }
-        return plan;
-      }));
+      } else {
+        // Normal öğretmen - Normal supabase kullan
+        const queryClient = supabase;
 
-      const enrichedWeeklyPlans = await Promise.all((weeklyPlans || []).map(async (plan) => {
-        if (plan.teacher_id) {
-          const { data: guidanceInstitution } = await supabase
-            .from('institutions')
-            .select('id')
-            .eq('guidance_teacher_id', plan.teacher_id)
-            .eq('is_active', true)
-            .maybeSingle();
-          
-          return {
-            ...plan,
-            isGuidanceTeacher: !!guidanceInstitution
-          };
+        // Günlük planları al
+        const { data: dailyPlans, error: dailyError } = await queryClient
+          .from('student_daily_plans')
+          .select('*')
+          .eq('student_id', studentId)
+          .order('plan_date', { ascending: false });
+
+        if (dailyError) {
+          console.error('Günlük planlar yüklenirken hata:', dailyError);
         }
-        return plan;
-      }));
 
-      setStudentPlans({
-        daily: enrichedDailyPlans || [],
-        weekly: enrichedWeeklyPlans || []
-      });
+        // Haftalık planları al
+        const { data: weeklyPlans, error: weeklyError } = await queryClient
+          .from('student_weekly_plans')
+          .select('*')
+          .eq('student_id', studentId)
+          .order('week_start_date', { ascending: false });
+
+        if (weeklyError) {
+          console.error('Haftalık planlar yüklenirken hata:', weeklyError);
+        }
+
+        // Rehber öğretmen kontrolü - Planları yükledikten sonra her plan için rehber öğretmen kontrolü yap
+        const enrichedDailyPlans = await Promise.all((dailyPlans || []).map(async (plan) => {
+          if (plan.teacher_id) {
+            const { data: guidanceInstitution } = await supabase
+              .from('institutions')
+              .select('id')
+              .eq('guidance_teacher_id', plan.teacher_id)
+              .eq('is_active', true)
+              .maybeSingle();
+            
+            return {
+              ...plan,
+              isGuidanceTeacher: !!guidanceInstitution
+            };
+          }
+          return plan;
+        }));
+
+        const enrichedWeeklyPlans = await Promise.all((weeklyPlans || []).map(async (plan) => {
+          if (plan.teacher_id) {
+            const { data: guidanceInstitution } = await supabase
+              .from('institutions')
+              .select('id')
+              .eq('guidance_teacher_id', plan.teacher_id)
+              .eq('is_active', true)
+              .maybeSingle();
+            
+            return {
+              ...plan,
+              isGuidanceTeacher: !!guidanceInstitution
+            };
+          }
+          return plan;
+        }));
+
+        setStudentPlans({
+          daily: enrichedDailyPlans || [],
+          weekly: enrichedWeeklyPlans || []
+        });
+      }
     } catch (error) {
       console.error('Öğrenci planları yüklenirken hata:', error);
       Alert.alert('Hata', 'Öğrenci planları yüklenemedi');
@@ -425,50 +472,62 @@ const TeacherHomeScreen = ({ navigation }) => {
   useEffect(() => {
     if (!showStudentPlansModal || !selectedStudent) return;
     
+    // Rehber öğretmen için realtime kontrolü devre dışı bırak (Edge Function kullanıldığı için)
+    // Normal öğretmenler için de interval süresini artır (10 saniye)
+    if (isGuidanceTeacher) {
+      return; // Rehber öğretmen için realtime kontrolü yapma
+    }
+    
+    let lastCheckTime = Date.now();
     const interval = setInterval(async () => {
       try {
-        // Rehber öğretmen kontrolü için queryClient kullan
-        const queryClient = isGuidanceTeacher ? supabaseAdmin : supabase;
-        
         // Sadece plan sayısını ve tamamlanma durumunu kontrol et
-        const { data: dailyPlans } = await queryClient
+        const { data: dailyPlans } = await supabase
           .from('student_daily_plans')
           .select('id, is_completed')
           .eq('student_id', selectedStudent.id);
 
-        const { data: weeklyPlans } = await queryClient
+        const { data: weeklyPlans } = await supabase
           .from('student_weekly_plans')
           .select('id, is_completed')
           .eq('student_id', selectedStudent.id);
 
-        // Mevcut planlarla karşılaştır
-        const currentDaily = studentPlans.daily || [];
-        const currentWeekly = studentPlans.weekly || [];
+        // Mevcut planlarla karşılaştır (studentPlans state'ini direkt kullanmak yerine callback kullan)
+        setStudentPlans(prevPlans => {
+          const currentDaily = prevPlans.daily || [];
+          const currentWeekly = prevPlans.weekly || [];
 
-        // Değişiklik var mı kontrol et
-        const dailyChanged = dailyPlans?.length !== currentDaily.length || 
-          dailyPlans?.some(plan => {
-            const current = currentDaily.find(p => p.id === plan.id);
-            return current && current.is_completed !== plan.is_completed;
-          });
+          // Değişiklik var mı kontrol et
+          const dailyChanged = dailyPlans?.length !== currentDaily.length || 
+            dailyPlans?.some(plan => {
+              const current = currentDaily.find(p => p.id === plan.id);
+              return current && current.is_completed !== plan.is_completed;
+            });
 
-        const weeklyChanged = weeklyPlans?.length !== currentWeekly.length || 
-          weeklyPlans?.some(plan => {
-            const current = currentWeekly.find(p => p.id === plan.id);
-            return current && current.is_completed !== plan.is_completed;
-          });
+          const weeklyChanged = weeklyPlans?.length !== currentWeekly.length || 
+            weeklyPlans?.some(plan => {
+              const current = currentWeekly.find(p => p.id === plan.id);
+              return current && current.is_completed !== plan.is_completed;
+            });
 
-        // Değişiklik varsa tam yükleme yap
-        if (dailyChanged || weeklyChanged) {
-          loadStudentPlans(selectedStudent.id);
-        }
+          // Değişiklik varsa tam yükleme yap
+          if (dailyChanged || weeklyChanged) {
+            // setTimeout ile asenkron yükleme yap (sonsuz döngüyü önlemek için)
+            setTimeout(() => {
+              loadStudentPlans(selectedStudent.id);
+            }, 100);
+          }
+
+          return prevPlans; // State'i değiştirme, sadece kontrol et
+        });
       } catch (error) {
         // Hata durumunda sessizce devam et
+        console.error('Plan kontrolü hatası:', error);
       }
-    }, 3000); // 3 saniyede bir kontrol et
+    }, 10000); // 10 saniyede bir kontrol et (3 saniye çok sık)
 
     return () => clearInterval(interval);
-  }, [showStudentPlansModal, selectedStudent, studentPlans, isGuidanceTeacher]);
+  }, [showStudentPlansModal, selectedStudent?.id, isGuidanceTeacher]); // studentPlans'ı dependency'den kaldır
 
   const handleSavePlan = async () => {
     if (!planTitle.trim() || !planDescription.trim()) {
@@ -523,17 +582,49 @@ const TeacherHomeScreen = ({ navigation }) => {
           style: 'destructive',
           onPress: async () => {
             try {
-              // Rehber öğretmen kontrolü için queryClient kullan
-              const queryClient = isGuidanceTeacher ? supabaseAdmin : supabase;
-              
-              const tableName = planType === 'daily' ? 'student_daily_plans' : 'student_weekly_plans';
-              const { data, error } = await queryClient
-                .from(tableName)
-                .delete()
-                .eq('id', plan.id)
-                .select();
+              // Öğretmen ID'sini al
+              const { data: { user } } = await supabase.auth.getUser();
+              if (!user) {
+                Alert.alert('Hata', 'Kullanıcı oturumu bulunamadı');
+                return;
+              }
 
-              if (error) throw error;
+              const { data: teacherData } = await supabase
+                .from('teachers')
+                .select('id')
+                .eq('user_id', user.id)
+                .single();
+
+              // Rehber öğretmen kontrolü
+              let institutionData = null;
+              if (isGuidanceTeacher && teacherData) {
+                const { data: instData } = await supabase
+                  .from('institutions')
+                  .select('id')
+                  .eq('guidance_teacher_id', teacherData.id)
+                  .eq('is_active', true)
+                  .maybeSingle();
+                institutionData = instData;
+              }
+
+              // Rehber öğretmen ise Edge Function kullan
+              if (isGuidanceTeacher && institutionData) {
+                const result = await deleteGuidanceTeacherStudentPlans([plan.id], institutionData.id, planType);
+                
+                if (result.error) {
+                  throw new Error(result.error.message || 'Plan silinemedi');
+                }
+              } else {
+                // Normal öğretmen
+                const tableName = planType === 'daily' ? 'student_daily_plans' : 'student_weekly_plans';
+                const { error } = await supabase
+                  .from(tableName)
+                  .delete()
+                  .eq('id', plan.id)
+                  .select();
+
+                if (error) throw error;
+              }
 
               Alert.alert('Başarılı', 'Plan silindi!');
               loadStudentPlans(selectedStudent.id);
@@ -567,19 +658,51 @@ const TeacherHomeScreen = ({ navigation }) => {
           style: 'destructive',
           onPress: async () => {
             try {
-              // Rehber öğretmen kontrolü için queryClient kullan
-              const queryClient = isGuidanceTeacher ? supabaseAdmin : supabase;
-              
-              const tableName = planType === 'daily' ? 'student_daily_plans' : 'student_weekly_plans';
-              const planIds = completedPlans.map(plan => plan.id);
-              
-              const { data, error } = await queryClient
-                .from(tableName)
-                .delete()
-                .in('id', planIds)
-                .select();
+              // Öğretmen ID'sini al
+              const { data: { user } } = await supabase.auth.getUser();
+              if (!user) {
+                Alert.alert('Hata', 'Kullanıcı oturumu bulunamadı');
+                return;
+              }
 
-              if (error) throw error;
+              const { data: teacherData } = await supabase
+                .from('teachers')
+                .select('id')
+                .eq('user_id', user.id)
+                .single();
+
+              // Rehber öğretmen kontrolü
+              let institutionData = null;
+              if (isGuidanceTeacher && teacherData) {
+                const { data: instData } = await supabase
+                  .from('institutions')
+                  .select('id')
+                  .eq('guidance_teacher_id', teacherData.id)
+                  .eq('is_active', true)
+                  .maybeSingle();
+                institutionData = instData;
+              }
+
+              const planIds = completedPlans.map(plan => plan.id);
+
+              // Rehber öğretmen ise Edge Function kullan
+              if (isGuidanceTeacher && institutionData) {
+                const result = await deleteGuidanceTeacherStudentPlans(planIds, institutionData.id, planType);
+                
+                if (result.error) {
+                  throw new Error(result.error.message || 'Planlar silinemedi');
+                }
+              } else {
+                // Normal öğretmen
+                const tableName = planType === 'daily' ? 'student_daily_plans' : 'student_weekly_plans';
+                const { error } = await supabase
+                  .from(tableName)
+                  .delete()
+                  .in('id', planIds)
+                  .select();
+
+                if (error) throw error;
+              }
 
               Alert.alert('Başarılı', `${completedPlans.length} adet plan silindi!`);
               loadStudentPlans(selectedStudent.id);
@@ -730,17 +853,18 @@ const TeacherHomeScreen = ({ navigation }) => {
       if (!institutionError && institutionData) {
         isGuidanceTeacher = true;
         
-        // Rehber öğretmen - Kurumundaki tüm öğrencilerin çalışmalarını göster
-        const { data: institutionMemberships, error: membershipError } = await supabase
-          .from('institution_memberships')
-          .select('user_id')
-          .eq('institution_id', institutionData.id)
-          .eq('role', 'student')
-          .eq('is_active', true);
-
-        if (!membershipError && institutionMemberships?.length > 0) {
-          connectedStudentIds = institutionMemberships.map(m => m.user_id).filter(Boolean);
+        // Rehber öğretmen - Edge Function ile kurumundaki tüm öğrencileri göster
+        const result = await getGuidanceTeacherStudents(institutionData.id);
+        
+        if (result.error) {
+          console.error('Rehber öğretmen öğrencileri yüklenirken hata:', result.error);
+          setLoading(false);
+          return;
         }
+
+        // Edge Function'dan gelen öğrenci listesini formatla
+        const studentsData = result.data?.data || result.data || [];
+        connectedStudentIds = studentsData.map(s => s.user_id).filter(Boolean);
       } else {
         // Normal öğretmen - Bağlı öğrencileri al
         const { data: students, error: studentsError } = await supabase
@@ -775,14 +899,33 @@ const TeacherHomeScreen = ({ navigation }) => {
       }
 
       // Öğrenci profil verilerini al
-      const queryClient = isGuidanceTeacher ? supabaseAdmin : supabase;
-      const { data: studentProfiles, error: profileError } = await queryClient
-        .from('user_profiles')
-        .select('user_id, name, email')
-        .in('user_id', connectedStudentIds);
+      // Rehber öğretmen için Edge Function'dan gelen veriler zaten name ve email içeriyor
+      // Normal öğretmen için normal supabase kullan
+      let studentProfiles = [];
+      
+      if (isGuidanceTeacher) {
+        // Rehber öğretmen - Edge Function'dan gelen verileri kullan
+        const result = await getGuidanceTeacherStudents(institutionData.id);
+        if (!result.error && result.data) {
+          const studentsData = result.data?.data || result.data || [];
+          studentProfiles = studentsData.map(s => ({
+            user_id: s.user_id,
+            name: s.name,
+            email: s.email
+          }));
+        }
+      } else {
+        // Normal öğretmen - Normal supabase kullan
+        const { data: profiles, error: profileError } = await supabase
+          .from('user_profiles')
+          .select('user_id, name, email')
+          .in('user_id', connectedStudentIds);
 
-      if (profileError) {
-        console.error('Öğrenci profilleri yüklenirken hata:', profileError);
+        if (profileError) {
+          console.error('Öğrenci profilleri yüklenirken hata:', profileError);
+        } else {
+          studentProfiles = profiles || [];
+        }
       }
 
       // Gerçek istatistikleri hesapla
@@ -796,65 +939,106 @@ const TeacherHomeScreen = ({ navigation }) => {
       const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
       const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
       
-      // Öğrenci ID'leri üzerinden döngü
-      for (const studentId of connectedStudentIds) {
-        // Her öğrenci için tüm çalışma verilerini getir
-        const { data: studyLogs, error: studyError } = await queryClient
-          .from('study_logs')
-          .select(`
-            id,
-            duration, 
-            focus_level, 
-            subject, 
-            study_date,
-            study_type,
-            topic,
-            correct_answers,
-            wrong_answers,
-            empty_answers,
-            notes,
-            created_at
-          `)
-          .eq('user_id', studentId)
-          .order('study_date', { ascending: false })
-          .limit(100); // Daha fazla veri çek (tüm veriler için)
-
-
-        if (studyError) {
-          console.error('Çalışma verileri yüklenirken hata:', studyError);
-          continue;
-        }
-
-        // İstatistikleri topla
-        totalStudies += studyLogs?.length || 0;
-        totalTime += studyLogs?.reduce((sum, log) => sum + (log.duration || 0), 0) || 0;
-        totalFocus += studyLogs?.reduce((sum, log) => sum + (log.focus_level || 0), 0) || 0;
-
-        // Son aktiviteleri ekle
-        studyLogs?.forEach(log => {
-          // Gerçek öğrenci ismini user_profiles'den çek
-          const studentProfile = studentProfiles?.find(p => p.user_id === studentId);
-          const studentName = studentProfile?.name || 'Öğrenci';
+      // Rehber öğretmen için Edge Function kullan, normal öğretmen için normal supabase
+      if (isGuidanceTeacher && institutionData) {
+        // Rehber öğretmen - Edge Function ile tüm kurum öğrencilerinin çalışma kayıtlarını getir
+        const result = await getGuidanceTeacherStudyLogs(institutionData.id);
+        
+        if (result.error) {
+          console.error('Rehber öğretmen çalışma kayıtları yüklenirken hata:', result.error);
+        } else {
+          const allStudyLogs = result.data?.data || result.data || [];
           
-          recentActivities.push({
-            id: log.id,
-            studentName: studentName,
-            subject: log.subject || 'Bilinmeyen',
-            time: new Date(log.study_date).toLocaleDateString('tr-TR') + ' ' + new Date(log.study_date).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
-            duration: log.duration || 0,
-            focus: log.focus_level || 0,
-            // Modal için gerekli ek alanlar
-            study_type: log.study_type || 'test',
-            topic: log.topic || '',
-            correct: log.correct_answers || 0,
-            wrong: log.wrong_answers || 0,
-            empty: log.empty_answers || 0,
-            focus_level: log.focus_level || 0,
-            notes: log.notes || '',
-            study_date: log.study_date,
-            created_at: log.created_at
+          // İstatistikleri topla
+          totalStudies = allStudyLogs.length;
+          totalTime = allStudyLogs.reduce((sum, log) => sum + (log.duration || 0), 0);
+          totalFocus = allStudyLogs.reduce((sum, log) => sum + (log.focus_level || 0), 0);
+          
+          // Son aktiviteleri ekle
+          allStudyLogs.forEach(log => {
+            // Gerçek öğrenci ismini user_profiles'den çek
+            const studentProfile = studentProfiles?.find(p => p.user_id === log.user_id);
+            const studentName = studentProfile?.name || 'Öğrenci';
+            
+            recentActivities.push({
+              id: log.id,
+              studentName: studentName,
+              subject: log.subject || 'Bilinmeyen',
+              time: new Date(log.study_date).toLocaleDateString('tr-TR') + ' ' + new Date(log.study_date).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+              duration: log.duration || 0,
+              focus: log.focus_level || 0,
+              // Modal için gerekli ek alanlar
+              study_type: log.study_type || 'test',
+              topic: log.topic || '',
+              correct: log.correct_answers || 0,
+              wrong: log.wrong_answers || 0,
+              empty: log.empty_answers || 0,
+              focus_level: log.focus_level || 0,
+              notes: log.notes || '',
+              study_date: log.study_date,
+              created_at: log.created_at
+            });
           });
-        });
+        }
+      } else {
+        // Normal öğretmen - Her öğrenci için ayrı ayrı çalışma verilerini getir
+        for (const studentId of connectedStudentIds) {
+          const { data: studyLogs, error: studyError } = await supabase
+            .from('study_logs')
+            .select(`
+              id,
+              duration, 
+              focus_level, 
+              subject, 
+              study_date,
+              study_type,
+              topic,
+              correct_answers,
+              wrong_answers,
+              empty_answers,
+              notes,
+              created_at
+            `)
+            .eq('user_id', studentId)
+            .order('study_date', { ascending: false })
+            .limit(100);
+
+          if (studyError) {
+            console.error(`Öğrenci ${studentId} için çalışma verileri yüklenirken hata:`, studyError);
+            continue;
+          }
+
+          // İstatistikleri topla
+          totalStudies += studyLogs?.length || 0;
+          totalTime += studyLogs?.reduce((sum, log) => sum + (log.duration || 0), 0) || 0;
+          totalFocus += studyLogs?.reduce((sum, log) => sum + (log.focus_level || 0), 0) || 0;
+
+          // Son aktiviteleri ekle
+          studyLogs?.forEach(log => {
+            // Gerçek öğrenci ismini user_profiles'den çek
+            const studentProfile = studentProfiles?.find(p => p.user_id === studentId);
+            const studentName = studentProfile?.name || 'Öğrenci';
+            
+            recentActivities.push({
+              id: log.id,
+              studentName: studentName,
+              subject: log.subject || 'Bilinmeyen',
+              time: new Date(log.study_date).toLocaleDateString('tr-TR') + ' ' + new Date(log.study_date).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+              duration: log.duration || 0,
+              focus: log.focus_level || 0,
+              // Modal için gerekli ek alanlar
+              study_type: log.study_type || 'test',
+              topic: log.topic || '',
+              correct: log.correct_answers || 0,
+              wrong: log.wrong_answers || 0,
+              empty: log.empty_answers || 0,
+              focus_level: log.focus_level || 0,
+              notes: log.notes || '',
+              study_date: log.study_date,
+              created_at: log.created_at
+            });
+          });
+        }
       }
 
       // Son 1 haftadaki odaklanma ortalamasını hesapla

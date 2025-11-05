@@ -131,14 +131,38 @@ export default function DashboardScreen({ navigation, route }) {
 
   // Bildirim izni kontrolü
   useEffect(() => {
-    Notifications.requestPermissionsAsync();
-    Notifications.setNotificationHandler({
-      handleNotification: async () => ({
-        shouldShowAlert: true,
-        shouldPlaySound: true,
-        shouldSetBadge: false,
-      }),
-    });
+    const setupNotifications = async () => {
+      try {
+        // Bildirim izni iste
+        const { status: existingStatus } = await Notifications.getPermissionsAsync();
+        let finalStatus = existingStatus;
+        
+        if (existingStatus !== 'granted') {
+          const { status } = await Notifications.requestPermissionsAsync();
+          finalStatus = status;
+        }
+        
+        // İzin yoksa sessizce devam et (hata verme)
+        if (finalStatus !== 'granted') {
+          console.log('Bildirim izni verilmedi, bildirimler gösterilmeyecek');
+          return;
+        }
+        
+        // Bildirim handler'ı ayarla
+        Notifications.setNotificationHandler({
+          handleNotification: async () => ({
+            shouldShowAlert: true,
+            shouldPlaySound: true,
+            shouldSetBadge: false,
+          }),
+        });
+      } catch (error) {
+        // Hata durumunda sessizce devam et
+        console.log('Bildirim kurulumu hatası:', error);
+      }
+    };
+    
+    setupNotifications();
   }, []);
 
   // Timer interval yönetimi
@@ -167,16 +191,33 @@ export default function DashboardScreen({ navigation, route }) {
     };
   }, [timerState, handleTimerComplete]);
 
-  // Bildirim gönderme fonksiyonu
+  // Bildirim gönderme fonksiyonu - hata kontrolü ile
   const sendNotification = async (title, body) => {
-    await Notifications.scheduleNotificationAsync({
-      content: {
-        title,
-        body,
-        sound: true,
-      },
-      trigger: null, // Anında gönder
-    });
+    try {
+      // İzin kontrolü
+      const { status } = await Notifications.getPermissionsAsync();
+      
+      if (status !== 'granted') {
+        // İzin yoksa sessizce çık (hata verme)
+        console.log('Bildirim izni yok, bildirim gönderilemedi');
+        return;
+      }
+      
+      // Bildirim gönder - icon ile
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title,
+          body,
+          sound: true,
+          // Android için icon (production build'de çalışır)
+          // iOS otomatik olarak app icon'unu kullanır
+        },
+        trigger: null, // Anında gönder
+      });
+    } catch (error) {
+      // Hata durumunda sessizce devam et (kullanıcıya gösterme)
+      console.log('Bildirim gönderme hatası:', error);
+    }
   };
 
   // Timer başlatma
@@ -477,6 +518,16 @@ export default function DashboardScreen({ navigation, route }) {
 
   const checkAuthStatus = async () => {
     try {
+      // Demo mod kontrolü - route params'tan isDemo'yu al
+      const routeIsDemo = route?.params?.isDemo || false;
+      
+      // Eğer demo moddaysa, auth kontrolü yapma
+      if (routeIsDemo) {
+        setIsDemo(true);
+        loadDemoData();
+        return;
+      }
+
       const { data: { user }, error: authError } = await supabase.auth.getUser();
       
       // Session kontrolü - eğer kullanıcı yoksa veya hata varsa demo moda geç veya login'e yönlendir
@@ -522,28 +573,43 @@ export default function DashboardScreen({ navigation, route }) {
   };
 
   useEffect(() => {
-    if (!isDemo) {
+    // Route params'tan isDemo'yu kontrol et
+    const routeIsDemo = route?.params?.isDemo || false;
+    
+    if (!routeIsDemo && !isDemo) {
       getUserProfile();
       fetchRecentLogs();
     } else {
+      setIsDemo(true);
       loadDemoData();
     }
-  }, [isDemo]);
+  }, [isDemo, route?.params?.isDemo]);
 
   // Sayfa focus olduğunda verileri yenile
   useEffect(() => {
     const unsubscribe = navigation.addListener('focus', () => {
-      if (!isDemo) {
+      // Route params'tan isDemo'yu kontrol et
+      const routeIsDemo = route?.params?.isDemo || false;
+      
+      if (!routeIsDemo && !isDemo) {
         getUserProfile(); // Profil bilgilerini de yenile (güncel ad soyad için)
         fetchRecentLogs();
       }
     });
 
     return unsubscribe;
-  }, [navigation, isDemo]);
+  }, [navigation, isDemo, route?.params?.isDemo]);
 
   const getUserProfile = async () => {
     try {
+      // Demo mod kontrolü - route params'tan isDemo'yu al
+      const routeIsDemo = route?.params?.isDemo || false;
+      
+      // Eğer demo moddaysa, auth kontrolü yapma
+      if (routeIsDemo || isDemo) {
+        return;
+      }
+
       const { data: { user: authUser }, error: authError } = await supabase.auth.getUser();
       
       // Session kontrolü - eğer kullanıcı yoksa veya hata varsa login'e yönlendir

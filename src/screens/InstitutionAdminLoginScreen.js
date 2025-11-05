@@ -17,7 +17,8 @@ import Container from '../components/Container';
 import Card from '../components/Card';
 import Input from '../components/Input';
 import Button from '../components/Button';
-import { supabase, supabaseAdmin } from '../lib/supabase';
+import { supabase } from '../lib/supabase';
+// ⚠️ supabaseAdmin artık kullanılmıyor - Edge Functions kullanılmalı
 
 const InstitutionAdminLoginScreen = ({ navigation }) => {
   const { isDark } = useTheme();
@@ -52,18 +53,22 @@ const InstitutionAdminLoginScreen = ({ navigation }) => {
       if (result && result.length > 0) {
         const institutionData = result[0];
         
-        // Kurum detaylarını yükle
+        // Kurum detaylarını yükle (RLS ile erişilebilir olmalı)
         let institutionDetails = null;
         try {
-          const { data: details } = await supabaseAdmin
-            .from('institutions')
-            .select('*')
-            .eq('id', institutionData.institution_id)
-            .single();
+          if (!supabase || !supabase.from) {
+            console.log('[DEBUG] supabase undefined veya from metodu yok');
+          } else {
+            const { data: details } = await supabase
+              .from('institutions')
+              .select('*')
+              .eq('id', institutionData.institution_id)
+              .single();
 
-          institutionDetails = details;
+            institutionDetails = details;
+          }
         } catch (error) {
-          console.error('Kurum detayları yüklenirken hata:', error);
+          console.log('[DEBUG] Kurum detayları RLS ile alınamadı, RPC verisi kullanılıyor');
         }
 
         const fullInstitutionData = institutionDetails 
@@ -78,23 +83,9 @@ const InstitutionAdminLoginScreen = ({ navigation }) => {
           contractEndDate.setHours(0, 0, 0, 0);
 
           if (contractEndDate < today) {
-            // Sözleşme bitmiş, kurumu pasif et ve girişi engelle
-            await supabaseAdmin
-              .from('institutions')
-              .update({
-                is_active: false,
-                is_premium: false,
-                updated_at: new Date().toISOString()
-              })
-              .eq('id', institutionData.institution_id);
-
-            await supabaseAdmin
-              .from('institution_memberships')
-              .update({
-                is_active: false,
-                updated_at: new Date().toISOString()
-              })
-              .eq('institution_id', institutionData.institution_id);
+            // Sözleşme bitmiş - Edge Function ile kurumu pasif etmek gerekir
+            // Şimdilik sadece uyarı göster, güncelleme işlemini backend'de yap
+            console.log('[DEBUG] Sözleşme bitmiş - Kurum pasif edilmeli (Edge Function ile yapılmalı)');
 
             Alert.alert(
               'Erişim Engellendi',

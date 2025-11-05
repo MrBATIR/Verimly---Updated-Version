@@ -24,6 +24,7 @@
         "NSPhotoLibraryUsageDescription": "Profil fotoğrafı için fotoğraf galerisi erişimi",
         "NSPhotoLibraryAddUsageDescription": "Çalışma özetlerini galeriye kaydetmek için fotoğraf galerisi erişimi gerektirir."
       },
+      "usesAppleSignIn": false,
       "appStoreUrl": "https://apps.apple.com/app/verimly/id123456789"
     },
     "android": {
@@ -48,6 +49,15 @@
           "isAccessMediaLocationEnabled": false,
           "audioPermission": false
         }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#ffffff",
+          "sounds": [],
+          "mode": "production"
+        }
       ]
     ],
     "web": {
@@ -58,7 +68,9 @@
     "extra": {
       "eas": {
         "projectId": "e7667173-f12f-45a6-97b7-bbfcf000f616"
-      }
+      },
+      "supabaseUrl": "https://jxxtdljuarnxsmqstzyy.supabase.co",
+      "supabaseAnonKey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp4eHRkbGp1YXJueHNtcXN0enl5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjIyMzgyMjUsImV4cCI6MjA3NzU5ODIyNX0.4A2TdG1ZYvyEKOv2D4S9TVbXeGe8or8v_ZEy-3_MbP0"
     },
     "privacy": "public",
     "category": "education"

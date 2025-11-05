@@ -61,14 +61,14 @@ export const getUnreadMessageCount = async () => {
       return { success: false, count: 0 };
     }
 
-    const { data, error } = await supabase
+    const { count, error } = await supabase
       .from('messages')
-      .select('id', { count: 'exact' })
+      .select('*', { count: 'exact', head: true })
       .eq('receiver_id', user.id)
       .eq('is_read', false);
 
     if (error) throw error;
-    return { success: true, count: data?.length || 0 };
+    return { success: true, count: count || 0 };
   } catch (error) {
     console.error('Okunmamış mesaj sayısı alma hatası:', error);
     return { success: false, count: 0 };

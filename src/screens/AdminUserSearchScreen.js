@@ -19,7 +19,8 @@ import Card from '../components/Card';
 import Button from '../components/Button';
 import Input from '../components/Input';
 import Select from '../components/Select';
-import { supabaseAdmin } from '../lib/supabase';
+import { supabase } from '../lib/supabase';
+import { searchAdminUsers, getAdminInstitutions, resetAdminUserPassword } from '../lib/adminApi';
 
 const AdminUserSearchScreen = ({ navigation }) => {
   const { isDark } = useTheme();
@@ -51,13 +52,14 @@ const AdminUserSearchScreen = ({ navigation }) => {
 
   const loadInstitutions = async () => {
     try {
-      const { data, error } = await supabaseAdmin
-        .from('institutions')
-        .select('id, name')
-        .order('name');
+      const result = await getAdminInstitutions();
 
-      if (error) throw error;
-      setInstitutions([{ id: '', name: 'Tüm Kurumlar' }, ...(data || [])]);
+      if (result.error) {
+        console.error('Kurumlar yükleme hatası:', result.error);
+        return;
+      }
+
+      setInstitutions([{ id: '', name: 'Tüm Kurumlar' }, ...(result.data || [])]);
     } catch (error) {
       console.error('Kurumlar yükleme hatası:', error);
     }
@@ -66,115 +68,18 @@ const AdminUserSearchScreen = ({ navigation }) => {
   const loadUsers = async () => {
     setLoading(true);
     try {
-      // Tüm kullanıcıları ve kurum bilgilerini al
-      const { data: userProfiles, error: profileError } = await supabaseAdmin
-        .from('user_profiles')
-        .select('user_id, name, email, user_type, created_at, institution_id');
+      const result = await searchAdminUsers();
 
-      if (profileError) throw profileError;
+      if (result.error) {
+        throw new Error(result.error?.message || result.error || 'Kullanıcılar yüklenemedi');
+      }
 
-      // Her kullanıcı için kurum bilgisini ve son giriş tarihini al
-      const usersWithDetails = await Promise.all(
-        (userProfiles || []).map(async (profile) => {
-          // Kurum bilgisi
-          let institutionName = 'Bireysel Kullanıcılar';
-          let institutionId = null;
-
-          if (profile.institution_id) {
-            const { data: institution } = await supabaseAdmin
-              .from('institutions')
-              .select('id, name')
-              .eq('id', profile.institution_id)
-              .single();
-            
-            if (institution) {
-              institutionName = institution.name;
-              institutionId = institution.id;
-            }
-          } else {
-            // institution_memberships'den kontrol et
-            const { data: membership } = await supabaseAdmin
-              .from('institution_memberships')
-              .select('institution_id')
-              .eq('user_id', profile.user_id)
-              .eq('is_active', true)
-              .single();
-
-            if (membership) {
-              const { data: institution } = await supabaseAdmin
-                .from('institutions')
-                .select('id, name')
-                .eq('id', membership.institution_id)
-                .single();
-              
-              if (institution) {
-                institutionName = institution.name;
-                institutionId = institution.id;
-              }
-            }
-          }
-
-          // Son giriş tarihi
-          let lastLogin = profile.created_at;
-          try {
-            const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(profile.user_id);
-            lastLogin = authUser?.user?.last_sign_in_at || profile.created_at;
-          } catch (error) {
-            // Auth hatası olursa created_at kullan
-          }
-
-          // Aktif kurum üyeliği kontrolü
-          let hasActiveMembership = false;
-          if (institutionId) {
-            // Kurum varsa aktif üyeliği kontrol et
-            const { data: activeMembership } = await supabaseAdmin
-              .from('institution_memberships')
-              .select('is_active')
-              .eq('user_id', profile.user_id)
-              .eq('institution_id', institutionId)
-              .eq('is_active', true)
-              .maybeSingle();
-            
-            hasActiveMembership = !!activeMembership;
-          } else {
-            // Kurum yoksa, herhangi bir aktif üyelik var mı kontrol et
-            const { data: anyActiveMembership } = await supabaseAdmin
-              .from('institution_memberships')
-              .select('is_active')
-              .eq('user_id', profile.user_id)
-              .eq('is_active', true)
-              .maybeSingle();
-            
-            hasActiveMembership = !!anyActiveMembership;
-          }
-
-          // Aktif/pasif durumu:
-          // 1. Aktif kurum üyeliği var mı? (is_active = true olan membership)
-          // 2. Son 30 gün içinde giriş yapmış mı?
-          const hasRecentLogin = lastLogin && new Date(lastLogin) > new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-          const isActive = hasActiveMembership && hasRecentLogin;
-
-          return {
-            user_id: profile.user_id,
-            name: profile.name,
-            email: profile.email,
-            user_type: profile.user_type,
-            created_at: profile.created_at,
-            last_login: lastLogin,
-            institution_id: institutionId,
-            institution_name: institutionName,
-            is_active: isActive,
-          };
-        })
-      );
-
-      // Alfabetik sıralama
-      usersWithDetails.sort((a, b) => a.name.localeCompare(b.name, 'tr'));
+      const usersWithDetails = result.data || [];
       setUsers(usersWithDetails);
       setFilteredUsers(usersWithDetails);
     } catch (error) {
       console.error('Kullanıcılar yüklenirken hata:', error);
-      Alert.alert('Hata', 'Kullanıcılar yüklenemedi: ' + error.message);
+      Alert.alert('Hata', `Kullanıcılar yüklenemedi: ${error.message}`);
     } finally {
       setLoading(false);
     }
@@ -285,11 +190,11 @@ const AdminUserSearchScreen = ({ navigation }) => {
 
               for (const userId of selectedUsers) {
                 try {
-                  const { error } = await supabaseAdmin.auth.admin.updateUserById(userId, {
-                    password: 'user123',
-                  });
+                  const result = await resetAdminUserPassword(userId);
 
-                  if (error) throw error;
+                  if (result.error) {
+                    throw new Error(result.error?.message || result.error || 'Şifre sıfırlanamadı');
+                  }
                   successCount++;
                 } catch (error) {
                   console.error(`Kullanıcı ${userId} şifre sıfırlama hatası:`, error);
@@ -305,7 +210,7 @@ const AdminUserSearchScreen = ({ navigation }) => {
               setSelectedUsers([]);
               loadUsers();
             } catch (error) {
-              Alert.alert('Hata', 'Toplu şifre sıfırlama sırasında bir hata oluştu');
+              Alert.alert('Hata', `Toplu şifre sıfırlama sırasında bir hata oluştu: ${error.message}`);
             } finally {
               setLoadingBulk(false);
               setShowBulkActions(false);

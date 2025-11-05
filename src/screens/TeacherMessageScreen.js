@@ -16,7 +16,8 @@ import { useFocusEffect } from '@react-navigation/native';
 import { Container, Button, Input, Card } from '../components';
 import * as teacherApi from '../lib/teacherApi';
 import { sendMessage, getSentMessages, deleteMessage, deleteAllMessagesToStudent } from '../lib/messageApi';
-import { supabase, supabaseAdmin } from '../lib/supabase';
+import { supabase } from '../lib/supabase';
+import { getGuidanceTeacherStudents, sendGuidanceTeacherMessage } from '../lib/adminApi';
 
 const TeacherMessageScreen = () => {
   const [students, setStudents] = useState([]);
@@ -26,6 +27,7 @@ const TeacherMessageScreen = () => {
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [expandedStudents, setExpandedStudents] = useState({}); // student_id -> expanded state
+  const [institutionId, setInstitutionId] = useState(null); // Rehber öğretmen için kurum ID'si
   const [showNewMessage, setShowNewMessage] = useState(false);
   const [isGuidanceTeacher, setIsGuidanceTeacher] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -146,18 +148,40 @@ const TeacherMessageScreen = () => {
       if (!institutionError && institutionData) {
         isGuidanceTeacherLocal = true;
         setIsGuidanceTeacher(true);
+        setInstitutionId(institutionData.id); // Kurum ID'sini sakla
         
-        // Rehber öğretmen - Kurumundaki tüm öğrencileri göster
-        const { data: institutionMemberships, error: membershipError } = await supabaseAdmin
-          .from('institution_memberships')
-          .select('user_id')
-          .eq('institution_id', institutionData.id)
-          .eq('role', 'student')
-          .eq('is_active', true);
-
-        if (!membershipError && institutionMemberships?.length > 0) {
-          studentIds = institutionMemberships.map(m => m.user_id).filter(Boolean);
+        // Rehber öğretmen - Edge Function ile kurumundaki tüm öğrencileri göster
+        const result = await getGuidanceTeacherStudents(institutionData.id);
+        
+        if (result.error) {
+          console.error('Rehber öğretmen öğrencileri yüklenirken hata:', result.error);
+          Alert.alert('Hata', result.error.message || 'Öğrenciler yüklenemedi');
+          setLoading(false);
+          return;
         }
+
+        // Edge Function'dan gelen öğrenci listesini formatla
+        // Edge Function { data: [...], error: null } formatında döndürüyor
+        // Supabase Functions bunu parse edip result.data olarak döndürüyor
+        const studentsData = result.data?.data || result.data || [];
+        const studentList = studentsData.map(student => ({
+          id: student.user_id, // Mesaj göndermek için user_id kullanılmalı
+          student_id: student.id, // students.id'yi saklamak için
+          name: student.name || `Öğrenci ${student.id?.substring(0, 8) || ''}`,
+          email: student.email || '',
+          avatar: null // Edge Function'dan avatar bilgisi gelmiyor, gerekirse eklenebilir
+        }));
+
+        // Alfabetik sıralama (isme göre)
+        studentList.sort((a, b) => {
+          const nameA = (a.name || '').toLowerCase();
+          const nameB = (b.name || '').toLowerCase();
+          return nameA.localeCompare(nameB, 'tr');
+        });
+
+        setStudents(studentList);
+        setLoading(false);
+        return;
       } else {
         setIsGuidanceTeacher(false);
         // Normal öğretmen - Bağlı öğrencileri al
@@ -184,10 +208,8 @@ const TeacherMessageScreen = () => {
         return;
       }
       
-      // Öğrenci profil verilerini al
-      const queryClient = isGuidanceTeacherLocal ? supabaseAdmin : supabase;
-      
-      const { data: studentProfiles, error: profileError } = await queryClient
+      // Normal öğretmen için öğrenci profil verilerini al
+      const { data: studentProfiles, error: profileError } = await supabase
         .from('user_profiles')
         .select('user_id, selected_avatar, name, email')
         .in('user_id', studentIds);
@@ -267,8 +289,25 @@ const TeacherMessageScreen = () => {
 
     setSending(true);
     try {
-      const result = await sendMessage(student.id, message.trim());
-      if (result.success) {
+      let result;
+      
+      // Rehber öğretmen ise Edge Function kullan
+      if (isGuidanceTeacher && institutionId) {
+        // student.id artık user_id, student.student_id ise students.id
+        const studentIdForMessage = student.student_id || student.id;
+        result = await sendGuidanceTeacherMessage(studentIdForMessage, institutionId, message.trim());
+        
+        if (result.error) {
+          showToastNotification(`❌ ${result.error.message || 'Mesaj gönderilemedi'}`, 'error');
+          setSending(false);
+          return;
+        }
+      } else {
+        // Normal öğretmen - normal sendMessage kullan
+        result = await sendMessage(student.id, message.trim());
+      }
+
+      if (result.success || result.data) {
         showToastNotification('✅ Mesaj başarıyla gönderildi', 'success');
         setMessage('');
         setSelectedStudent(null);
@@ -278,6 +317,7 @@ const TeacherMessageScreen = () => {
         showToastNotification(`❌ ${result.error || 'Mesaj gönderilemedi'}`, 'error');
       }
     } catch (error) {
+      console.error('Mesaj gönderme hatası:', error);
       showToastNotification('❌ Mesaj gönderilemedi', 'error');
     } finally {
       setSending(false);

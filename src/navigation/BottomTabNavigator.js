@@ -95,6 +95,7 @@ function BottomTabNavigatorContent({ isDemo }) {
     const interval = setInterval(() => {
       if (userType === 'teacher') {
         loadPendingRequestsCount();
+        loadUnreadMessageCount(); // Öğretmenler için de okunmamış mesaj sayısını kontrol et
       } else if (userType === 'student') {
         loadUnreadMessageCount();
       }
@@ -285,7 +286,20 @@ function BottomTabNavigatorContent({ isDemo }) {
                name="TeacherMessage" 
                component={TeacherMessageScreen}
                initialParams={{ isDemo }}
-               options={{ tabBarLabel: 'Mesajlar' }}
+               options={{ 
+                 tabBarLabel: 'Mesajlar',
+                 tabBarBadge: unreadMessageCount > 0 ? unreadMessageCount : undefined,
+                 tabBarBadgeStyle: {
+                   backgroundColor: colors.error,
+                   color: colors.surface,
+                   fontSize: 11,
+                   fontWeight: 'bold',
+                   minWidth: 18,
+                   height: 18,
+                   borderRadius: 9,
+                   lineHeight: 18,
+                 }
+               }}
              />
             <Tab.Screen 
               name="TeacherAdd" 
@@ -375,7 +389,20 @@ function BottomTabNavigatorContent({ isDemo }) {
               name="StudentMessage" 
               component={StudentMessageScreen}
               initialParams={{ isDemo }}
-              options={{ tabBarLabel: 'Mesajlar' }}
+              options={{ 
+                tabBarLabel: 'Mesajlar',
+                tabBarBadge: unreadMessageCount > 0 ? unreadMessageCount : undefined,
+                tabBarBadgeStyle: {
+                   backgroundColor: colors.error,
+                   color: colors.surface,
+                   fontSize: 11,
+                   fontWeight: 'bold',
+                   minWidth: 18,
+                   height: 18,
+                   borderRadius: 9,
+                   lineHeight: 18,
+                 }
+              }}
             />
           )}
         </>

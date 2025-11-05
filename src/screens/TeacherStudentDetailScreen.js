@@ -4,7 +4,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../contexts/ThemeContext';
 import { DARK_COLORS, COLORS } from '../constants/theme';
 import { Container, Card } from '../components';
-import { supabase, supabaseAdmin } from '../lib/supabase';
+import { supabase } from '../lib/supabase';
+import { getGuidanceTeacherStudyLogs } from '../lib/adminApi';
 import Svg, { Circle, Path } from 'react-native-svg';
 
 // Gerçek dairesel pasta grafik komponenti
@@ -249,27 +250,86 @@ const TeacherStudentDetailScreen = ({ route, navigation }) => {
         endDate = new Date(selectedYear, selectedMonth, lastDayOfMonth.getDate(), 23, 59, 59, 999);
       }
       
-      // Rehber öğretmen kontrolü - eğer route params'da isGuidanceTeacher varsa supabaseAdmin kullan
+      // Rehber öğretmen kontrolü
       const isGuidanceTeacherParam = route?.params?.isGuidanceTeacher || false;
-      const queryClient = isGuidanceTeacherParam ? supabaseAdmin : supabase;
+      let data = [];
+      let error = null;
       
-      // Veritabanı sorgusu için UTC aralığı (geniş buffer ile)
-      // Local timezone'daki günün başı ve sonunun UTC karşılığı
-      // Örneğin: Türkiye'de 1 Kasım 00:00:00 (UTC+3) = UTC'de 31 Ekim 21:00:00
-      // Bu yüzden buffer ekleyerek geniş bir aralık kullanıyoruz
-      const queryStart = new Date(startDate);
-      queryStart.setHours(queryStart.getHours() - 12); // 12 saat öncesi buffer
-      const queryEnd = new Date(endDate);
-      queryEnd.setHours(queryEnd.getHours() + 12); // 12 saat sonrası buffer
-      
-      // Öğrencinin çalışma loglarını al - geniş tarih aralığı (client-side'da filtreleyeceğiz)
-      const { data, error } = await queryClient
-        .from('study_logs')
-        .select('*')
-        .eq('user_id', studentId)
-        .gte('study_date', queryStart.toISOString())
-        .lte('study_date', queryEnd.toISOString())
-        .order('study_date', { ascending: false });
+      if (isGuidanceTeacherParam) {
+        // Rehber öğretmen - Edge Function kullan
+        // Öğretmen ID'sini al
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) {
+          throw new Error('Kullanıcı oturumu bulunamadı');
+        }
+
+        const { data: teacherData } = await supabase
+          .from('teachers')
+          .select('id')
+          .eq('user_id', user.id)
+          .single();
+
+        if (!teacherData) {
+          throw new Error('Öğretmen bulunamadı');
+        }
+
+        // Kurum ID'sini al
+        const { data: institutionData } = await supabase
+          .from('institutions')
+          .select('id')
+          .eq('guidance_teacher_id', teacherData.id)
+          .eq('is_active', true)
+          .maybeSingle();
+
+        if (institutionData) {
+          // Öğrencinin students.id'sini bul (studentId user_id olabilir)
+          const { data: studentData } = await supabase
+            .from('students')
+            .select('id')
+            .or(`user_id.eq.${studentId},id.eq.${studentId}`)
+            .eq('institution_id', institutionData.id)
+            .maybeSingle();
+
+          if (studentData) {
+            // Veritabanı sorgusu için UTC aralığı (geniş buffer ile)
+            const queryStart = new Date(startDate);
+            queryStart.setHours(queryStart.getHours() - 12);
+            const queryEnd = new Date(endDate);
+            queryEnd.setHours(queryEnd.getHours() + 12);
+            
+            const result = await getGuidanceTeacherStudyLogs(
+              institutionData.id,
+              [studentData.id], // Sadece bu öğrenci
+              queryStart.toISOString(),
+              queryEnd.toISOString()
+            );
+            
+            if (result.error) {
+              error = result.error;
+            } else {
+              data = result.data?.data || result.data || [];
+            }
+          }
+        }
+      } else {
+        // Normal öğretmen - Normal supabase kullan
+        // Veritabanı sorgusu için UTC aralığı (geniş buffer ile)
+        const queryStart = new Date(startDate);
+        queryStart.setHours(queryStart.getHours() - 12); // 12 saat öncesi buffer
+        const queryEnd = new Date(endDate);
+        queryEnd.setHours(queryEnd.getHours() + 12); // 12 saat sonrası buffer
+        
+        const queryResult = await supabase
+          .from('study_logs')
+          .select('*')
+          .eq('user_id', studentId)
+          .gte('study_date', queryStart.toISOString())
+          .lte('study_date', queryEnd.toISOString())
+          .order('study_date', { ascending: false });
+        
+        data = queryResult.data || [];
+        error = queryResult.error;
+      }
 
       if (error) {
         console.error('Öğrenci logları yükleme hatası:', error);

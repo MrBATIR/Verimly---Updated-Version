@@ -123,6 +123,17 @@ export default function ProfileScreen({ route, navigation }) {
       setLoading(true);
     }
     try {
+      // Demo mod kontrolü - route params'tan isDemo'yu al
+      const routeIsDemo = route?.params?.isDemo || false;
+      
+      // Eğer demo moddaysa, auth kontrolü yapma ve login'e yönlendirme
+      if (routeIsDemo) {
+        if (showLoading) {
+          setLoading(false);
+        }
+        return;
+      }
+
       const { data: { user: authUser }, error: authError } = await supabase.auth.getUser();
       
       // Session kontrolü - eğer kullanıcı yoksa veya hata varsa login'e yönlendir
@@ -416,7 +427,10 @@ export default function ProfileScreen({ route, navigation }) {
   };
 
   useEffect(() => {
-    if (!isDemo) {
+    // Route params'tan isDemo'yu kontrol et
+    const routeIsDemo = route?.params?.isDemo || false;
+    
+    if (!routeIsDemo && !isDemo) {
       loadUserProfile(true); // İlk yüklemede loading göster
       // Sadece öğrenciler için bağlı öğretmenleri yükle
       if (userType === 'student') {
@@ -429,12 +443,15 @@ export default function ProfileScreen({ route, navigation }) {
       }
     }
     loadSelectedAvatar();
-  }, [isDemo, userType]);
+  }, [isDemo, userType, route?.params?.isDemo]);
 
   // Ekran her odaklandığında bağlı öğretmenleri yenile
   useFocusEffect(
     React.useCallback(() => {
-      if (!isDemo) {
+      // Route params'tan isDemo'yu kontrol et
+      const routeIsDemo = route?.params?.isDemo || false;
+      
+      if (!routeIsDemo && !isDemo) {
         // Öğrenciler için bireysel kullanıcı kontrolünü ve bağlı öğretmenleri yenile
         if (userType === 'student') {
           loadUserProfile(false); // Arka planda yükle, loading gösterme

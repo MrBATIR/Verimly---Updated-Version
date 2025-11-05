@@ -26,7 +26,8 @@ export default function AddLogScreen({ navigation, route }) {
   const slideAnim = useRef(new Animated.Value(50)).current;
   const scrollViewRef = useRef(null);
   
-  const [isDemo, setIsDemo] = useState(false);
+  // Demo mod kontrolü - route params'tan isDemo'yu al
+  const isDemo = route?.params?.isDemo || false;
   
   // Tema context'ini kullan
   const { isDark } = useTheme();
@@ -151,8 +152,16 @@ export default function AddLogScreen({ navigation, route }) {
 
   const checkAuthStatus = async () => {
     try {
+      // Demo mod kontrolü - route params'tan isDemo'yu al
+      const routeIsDemo = route?.params?.isDemo || false;
+      
+      // Eğer demo moddaysa, auth kontrolü yapma
+      if (routeIsDemo) {
+        setPreviousSubjects(['Matematik', 'Fizik', 'Kimya', 'Biyoloji', 'Türkçe']);
+        return;
+      }
+
       const { data: { user } } = await supabase.auth.getUser();
-      setIsDemo(!user); // Kullanıcı yoksa demo mod
       
       if (user) {
         fetchPreviousSubjects();
@@ -161,7 +170,6 @@ export default function AddLogScreen({ navigation, route }) {
       }
     } catch (error) {
       console.error('Auth check error:', error);
-      setIsDemo(true);
       setPreviousSubjects(['Matematik', 'Fizik', 'Kimya', 'Biyoloji', 'Türkçe']);
     }
   };

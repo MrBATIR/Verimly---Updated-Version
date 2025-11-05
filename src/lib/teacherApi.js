@@ -1,4 +1,5 @@
-import { supabase, supabaseAdmin } from './supabase';
+import { supabase } from './supabase';
+import { createGuidanceTeacherStudentPlan } from './adminApi';
 
 // ========================================
 // ÖĞRETMEN-ÖĞRENCİ BAĞLANTI API FONKSİYONLARI
@@ -782,18 +783,35 @@ export const createStudentPlan = async (studentId, title, description, planDate,
       isGuidanceTeacher = true;
     }
 
-    // Rehber öğretmen ise supabaseAdmin kullan
-    const queryClient = isGuidanceTeacher ? supabaseAdmin : supabase;
+    // Rehber öğretmen ise Edge Function kullan
+    if (isGuidanceTeacher && institutionData) {
+      const planDateStr = planDate instanceof Date ? planDate.toISOString().split('T')[0] : planDate;
+      const result = await createGuidanceTeacherStudentPlan(
+        studentId,
+        institutionData.id,
+        title,
+        description,
+        planDateStr,
+        planType
+      );
 
+      if (result.error) {
+        throw new Error(result.error.message || 'Plan oluşturulamadı');
+      }
+
+      return { success: true, data: result.data?.data || result.data, message: 'Plan başarıyla oluşturuldu.' };
+    }
+
+    // Normal öğretmen - Normal supabase kullan
     // Plan oluştur
     let data, error;
     
     if (planType === 'daily') {
-      const result = await queryClient
+      const result = await supabase
         .from('student_daily_plans')
         .insert({
           student_id: studentId,
-          teacher_id: teacher.id, // teacher_id ile öğrenci tarafında rehber öğretmen kontrolü yapılabilir
+          teacher_id: teacher.id,
           title: title,
           description: description,
           plan_date: planDate instanceof Date ? planDate.toISOString().split('T')[0] : planDate, // YYYY-MM-DD formatında
@@ -811,11 +829,11 @@ export const createStudentPlan = async (studentId, title, description, planDate,
       const diff = weekStart.getDate() - day + (day === 0 ? -6 : 1); // Pazartesi
       weekStart.setDate(diff);
       
-      const result = await queryClient
+      const result = await supabase
         .from('student_weekly_plans')
         .insert({
           student_id: studentId,
-          teacher_id: teacher.id, // teacher_id ile öğrenci tarafında rehber öğretmen kontrolü yapılabilir
+          teacher_id: teacher.id,
           title: title,
           description: description,
           week_start_date: weekStart.toISOString().split('T')[0], // YYYY-MM-DD formatında

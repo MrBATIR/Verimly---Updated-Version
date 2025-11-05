@@ -19,7 +19,9 @@ import Container from '../components/Container';
 import Card from '../components/Card';
 import Input from '../components/Input';
 import Button from '../components/Button';
-import { supabase, supabaseAdmin } from '../lib/supabase';
+import { supabase } from '../lib/supabase';
+import { getAdminInstitutions, addAdminInstitution, toggleAdminInstitutionStatus, updateAdminContract, updateAdminInstitution } from '../lib/adminApi';
+// ⚠️ supabaseAdmin artık kullanılmıyor - Edge Functions kullanılmalı
 
 const AdminInstitutionsScreen = ({ navigation }) => {
   const { isDark } = useTheme();
@@ -30,6 +32,7 @@ const AdminInstitutionsScreen = ({ navigation }) => {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
+  const [showEditForm, setShowEditForm] = useState(false);
   const [showCredentials, setShowCredentials] = useState(false);
   const [showContractModal, setShowContractModal] = useState(false);
   const [generatedCredentials, setGeneratedCredentials] = useState(null);
@@ -43,6 +46,20 @@ const AdminInstitutionsScreen = ({ navigation }) => {
     contact_email: '',
     contact_phone: '',
     address: '',
+    admin_username: '',
+    admin_password: '',
+  });
+
+  // Kurum düzenleme form verileri
+  const [editFormData, setEditFormData] = useState({
+    name: '',
+    type: 'school',
+    contact_email: '',
+    contact_phone: '',
+    address: '',
+    max_teachers: 50,
+    max_students: 500,
+    notes: '',
     admin_username: '',
     admin_password: '',
   });
@@ -62,60 +79,14 @@ const AdminInstitutionsScreen = ({ navigation }) => {
   const [endDate, setEndDate] = useState(new Date());
 
   // Sözleşme bitiş tarihi kontrolü ve otomatik pasif etme
+  // NOT: Bu fonksiyon artık Edge Function kullanmıyor çünkü sözleşme güncelleme sırasında
+  // Edge Function otomatik olarak tarih kontrollerini yapıyor.
+  // Bu fonksiyon sadece sayfa yüklendiğinde çağrılıyor, ancak artık gerekli değil.
+  // Edge Function'lar sözleşme tarihlerine göre kurum durumunu otomatik ayarlıyor.
   const checkContractExpiry = async (institutionId = null) => {
-    try {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const todayStr = today.toISOString().split('T')[0];
-      
-      let query = supabaseAdmin
-        .from('institutions')
-        .select('id, name, contract_end_date, is_active')
-        .not('contract_end_date', 'is', null)
-        .lt('contract_end_date', todayStr);
-
-      // Eğer belirli bir kurum kontrol ediliyorsa
-      if (institutionId) {
-        query = query.eq('id', institutionId);
-      } else {
-        // Aktif olanları kontrol et
-        query = query.eq('is_active', true);
-      }
-
-      const { data: expiredInstitutions, error } = await query;
-
-      if (error) {
-        console.error('Sözleşme kontrolü hatası:', error);
-        return;
-      }
-
-      if (expiredInstitutions && expiredInstitutions.length > 0) {
-        // Süresi dolmuş kurumları pasif et
-        for (const institution of expiredInstitutions) {
-          await supabaseAdmin
-            .from('institutions')
-            .update({
-              is_active: false,
-              is_premium: false,
-              updated_at: new Date().toISOString()
-            })
-            .eq('id', institution.id);
-
-          // Üyelerin erişimini de kapat
-          await supabaseAdmin
-            .from('institution_memberships')
-            .update({
-              is_active: false,
-              updated_at: new Date().toISOString()
-            })
-            .eq('institution_id', institution.id);
-
-          console.log(`Kurum pasif edildi: ${institution.name} (Sözleşme: ${institution.contract_end_date})`);
-        }
-      }
-    } catch (error) {
-      console.error('Sözleşme kontrolü genel hatası:', error);
-    }
+    // Bu fonksiyon artık kullanılmıyor - Edge Functions tarih kontrollerini yapıyor
+    // Gelecekte bir cron job veya scheduled Edge Function ile yapılabilir
+    console.log('Sözleşme kontrolü: Edge Functions tarafından otomatik yapılıyor');
   };
 
   // Sayfa yüklendiğinde kurumları yükle ve sözleşme kontrolü yap
@@ -137,20 +108,17 @@ const AdminInstitutionsScreen = ({ navigation }) => {
   const loadInstitutions = async () => {
     setLoading(true);
     try {
-      const { data: institutionsData, error } = await supabaseAdmin
-        .from('institutions')
-        .select('*')
-        .order('created_at', { ascending: false });
+      const result = await getAdminInstitutions();
 
-      if (error) {
-        throw error;
+      if (result.error) {
+        throw new Error(result.error?.message || result.error || 'Kurumlar yüklenemedi');
       }
 
-      setInstitutions(institutionsData || []);
+      setInstitutions(result.data || []);
       setInstitutionsLoaded(true);
     } catch (error) {
       console.error('Kurumlar yükleme hatası:', error);
-      Alert.alert('Hata', 'Kurumlar yüklenirken bir hata oluştu: ' + error.message);
+      Alert.alert('Hata', `Kurumlar yüklenirken bir hata oluştu: ${error?.message || 'Bilinmeyen hata'}`);
     } finally {
       setLoading(false);
     }
@@ -161,77 +129,46 @@ const AdminInstitutionsScreen = ({ navigation }) => {
 
     setSaving(true);
     try {
-      // Önce kurum oluştur (admin client ile RLS'i bypass ediyoruz)
-      // Eski sistemde admin_username ve admin_password hem institutions hem de institution_admin_credentials tablosuna kaydediliyordu
-      const { data: institutionData, error: institutionError } = await supabaseAdmin
-        .from('institutions')
-        .insert({
-          name: formData.name,
-          type: formData.type,
-          contact_email: formData.contact_email,
-          contact_phone: formData.contact_phone,
-          address: formData.address,
-          is_active: false, // Başlangıçta pasif
-          is_premium: false,
-          auto_renewal: false,
-          renewal_type: 'manual',
-          payment_status: 'pending',
-          admin_username: formData.admin_username,
-          admin_password: formData.admin_password, // Plain text - güvenlik için bcrypt ile hash'lenmeli
-        })
-        .select()
-        .single();
+      const result = await addAdminInstitution({
+        name: formData.name,
+        type: formData.type,
+        contact_email: formData.contact_email,
+        contact_phone: formData.contact_phone,
+        address: formData.address,
+        admin_username: formData.admin_username,
+        admin_password: formData.admin_password,
+      });
 
-      if (institutionError) throw institutionError;
-
-      // Kurum admin giriş bilgilerini institution_admin_credentials tablosuna da kaydet
-      try {
-        const { data: credentialsData, error: credentialsError } = await supabaseAdmin
-          .from('institution_admin_credentials')
-          .insert({
-            institution_id: institutionData.id,
-            admin_username: formData.admin_username,
-            admin_password: formData.admin_password, // Plain text - güvenlik için bcrypt ile hash'lenmeli
-            is_active: true
-          })
-          .select()
-          .single();
-
-        if (credentialsError) {
-          // Eğer tablo yoksa veya hata varsa, sadece uyarı ver (zaten institutions tablosuna kaydedildi)
-          console.warn('Admin credentials tablosuna kayıt hatası:', credentialsError);
-        }
-
-        setGeneratedCredentials({
-          institutionName: formData.name,
-          adminUsername: formData.admin_username,
-          adminPassword: formData.admin_password,
-        });
-
-        // Formu temizle
-        setFormData({
-          name: '',
-          type: 'school',
-          contact_email: '',
-          contact_phone: '',
-          address: '',
-          admin_username: '',
-          admin_password: '',
-        });
-
-        setShowAddForm(false);
-        setShowCredentials(true);
-        loadInstitutions(); // Listeyi yenile
-      } catch (credentialsErr) {
-        // Admin credentials eklenemedi ama kurum oluşturuldu
-        console.error('Admin credentials oluşturma hatası:', credentialsErr);
-        Alert.alert('Uyarı', 'Kurum oluşturuldu ancak admin giriş bilgileri kaydedilemedi. Manuel olarak ekleyebilirsiniz.');
-        setShowAddForm(false);
-        loadInstitutions();
+      if (result.error) {
+        throw new Error(result.error?.message || result.error || 'Kurum eklenemedi');
       }
+
+      const institutionData = result.data?.institution;
+      const credentialsData = result.data?.credentials;
+
+      setGeneratedCredentials({
+        institutionName: formData.name,
+        adminUsername: formData.admin_username,
+        adminPassword: formData.admin_password,
+      });
+
+      // Formu temizle
+      setFormData({
+        name: '',
+        type: 'school',
+        contact_email: '',
+        contact_phone: '',
+        address: '',
+        admin_username: '',
+        admin_password: '',
+      });
+
+      setShowAddForm(false);
+      setShowCredentials(true);
+      loadInstitutions(); // Listeyi yenile
     } catch (error) {
       console.error('Kurum ekleme hatası:', error);
-      Alert.alert('Hata', 'Kurum eklenirken bir hata oluştu: ' + error.message);
+      Alert.alert('Hata', `Kurum eklenirken bir hata oluştu: ${error?.message || 'Bilinmeyen hata'}`);
     } finally {
       setSaving(false);
     }
@@ -270,20 +207,20 @@ const AdminInstitutionsScreen = ({ navigation }) => {
           text: 'Evet',
           onPress: async () => {
             try {
-              const { error } = await supabaseAdmin
-                .from('institutions')
-                .update({ is_active: newStatus })
-                .eq('id', institution.id);
+              const result = await toggleAdminInstitutionStatus(institution.id, newStatus);
 
-              if (error) {
-                throw error;
+              if (result.error) {
+                throw new Error(result.error?.message || result.error || 'Kurum durumu değiştirilemedi');
               }
 
               Alert.alert('Başarılı', `Kurum ${action} edildi.`);
-              loadInstitutions(); // Listeyi yenile
+              // Listeyi yenile - kısa bir gecikme ile cache'i temizlemek için
+              setTimeout(() => {
+                loadInstitutions();
+              }, 500);
             } catch (error) {
               console.error('Kurum durumu değiştirme hatası:', error);
-              Alert.alert('Hata', 'Kurum durumu değiştirilemedi: ' + error.message);
+              Alert.alert('Hata', `Kurum durumu değiştirilemedi: ${error?.message || 'Bilinmeyen hata'}`);
             }
           },
         },
@@ -323,7 +260,9 @@ const AdminInstitutionsScreen = ({ navigation }) => {
   };
   
   // Tarih değişiklik handler'ları
-  const handleStartDateChange = async (event, selectedDate) => {
+  // NOT: Tarih değişikliklerinde artık inline güncelleme yapılmıyor.
+  // Tüm mantık handleContractUpdate içinde Edge Function ile yapılıyor.
+  const handleStartDateChange = (event, selectedDate) => {
     if (Platform.OS === 'android') {
       setShowStartDatePicker(false);
     }
@@ -334,103 +273,13 @@ const AdminInstitutionsScreen = ({ navigation }) => {
         ...contractData, 
         contract_start_date: formattedDate 
       });
-
-      // Tarih kontrolleri
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const selectedDateOnly = new Date(selectedDate);
-      selectedDateOnly.setHours(0, 0, 0, 0);
-      
-      // Bitiş tarihini kontrol et
-      const endDateOnly = contractData.contract_end_date 
-        ? new Date(contractData.contract_end_date)
-        : null;
-
-      // Başlangıç tarihi gelecekte ise -> pasif et
-      if (selectedDateOnly > today) {
-        await supabaseAdmin
-          .from('institutions')
-          .update({
-            is_active: false,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', selectedInstitution.id);
-
-        await supabaseAdmin
-          .from('institution_memberships')
-          .update({
-            is_active: false,
-            updated_at: new Date().toISOString()
-          })
-          .eq('institution_id', selectedInstitution.id);
-
-        Alert.alert(
-          'Bilgi', 
-          `Sözleşme başlangıç tarihi gelecekte. "${selectedInstitution.name}" kurumu sözleşme başlangıcına kadar pasif kalacak.`
-        );
-      }
-      // Başlangıç tarihi geçmiş/bugün VE bitiş tarihi gelecekte/bugün ise -> aktif et (eğer pasif ise)
-      else if (selectedDateOnly <= today && endDateOnly && endDateOnly >= today) {
-        if (!selectedInstitution.is_active) {
-          await supabaseAdmin
-            .from('institutions')
-            .update({
-              is_active: true,
-              updated_at: new Date().toISOString()
-            })
-            .eq('id', selectedInstitution.id);
-
-          await supabaseAdmin
-            .from('institution_memberships')
-            .update({
-              is_active: true,
-              updated_at: new Date().toISOString()
-            })
-            .eq('institution_id', selectedInstitution.id);
-
-          Alert.alert(
-            'Bilgi', 
-            `Sözleşme başlangıç tarihi geçmiş/bugün ve bitiş tarihi gelecekte. "${selectedInstitution.name}" kurumu otomatik olarak aktif edildi.`
-          );
-          
-          // State'i güncelle
-          setSelectedInstitution({
-            ...selectedInstitution,
-            is_active: true
-          });
-        }
-      }
-      // Başlangıç tarihi geçmiş/bugün ama bitiş tarihi yok veya geçmiş ise -> pasif et
-      else if (selectedDateOnly <= today && (!endDateOnly || endDateOnly < today)) {
-        await supabaseAdmin
-          .from('institutions')
-          .update({
-            is_active: false,
-            is_premium: false,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', selectedInstitution.id);
-
-        await supabaseAdmin
-          .from('institution_memberships')
-          .update({
-            is_active: false,
-            updated_at: new Date().toISOString()
-          })
-          .eq('institution_id', selectedInstitution.id);
-
-        Alert.alert(
-          'Bilgi', 
-          `Sözleşme bitiş tarihi geçmiş veya belirlenmemiş. "${selectedInstitution.name}" kurumu pasif edildi.`
-        );
-      }
     }
     if (Platform.OS === 'ios') {
       // iOS'ta modal içinde kalır
     }
   };
   
-  const handleEndDateChange = async (event, selectedDate) => {
+  const handleEndDateChange = (event, selectedDate) => {
     if (Platform.OS === 'android') {
       setShowEndDatePicker(false);
     }
@@ -441,90 +290,6 @@ const AdminInstitutionsScreen = ({ navigation }) => {
         ...contractData, 
         contract_end_date: formattedDate 
       });
-
-      // Tarih kontrolleri
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const selectedDateOnly = new Date(selectedDate);
-      selectedDateOnly.setHours(0, 0, 0, 0);
-      
-      // Başlangıç tarihini kontrol et
-      const startDateOnly = contractData.contract_start_date 
-        ? new Date(contractData.contract_start_date)
-        : new Date(2000, 0, 1); // Varsayılan eski tarih
-      startDateOnly.setHours(0, 0, 0, 0);
-
-      // Bitiş tarihi geçmiş ise -> pasif et
-      if (selectedDateOnly < today) {
-        await supabaseAdmin
-          .from('institutions')
-          .update({
-            is_active: false,
-            is_premium: false,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', selectedInstitution.id);
-
-        await supabaseAdmin
-          .from('institution_memberships')
-          .update({
-            is_active: false,
-            updated_at: new Date().toISOString()
-          })
-          .eq('institution_id', selectedInstitution.id);
-
-        Alert.alert(
-          'Bilgi', 
-          `Sözleşme bitiş tarihi geçmiş bir tarih seçildi. "${selectedInstitution.name}" kurumu otomatik olarak pasif edildi ve üyelerin erişimi kapatıldı.`
-        );
-      } 
-      // Bitiş tarihi gelecekte VE başlangıç tarihi geçmiş/bugün ise -> aktif et (eğer pasif ise)
-      else if (selectedDateOnly >= today && startDateOnly <= today) {
-        // Sadece pasif durumdaysa aktif et
-        if (!selectedInstitution.is_active) {
-          await supabaseAdmin
-            .from('institutions')
-            .update({
-              is_active: true,
-              updated_at: new Date().toISOString()
-            })
-            .eq('id', selectedInstitution.id);
-
-          await supabaseAdmin
-            .from('institution_memberships')
-            .update({
-              is_active: true,
-              updated_at: new Date().toISOString()
-            })
-            .eq('institution_id', selectedInstitution.id);
-
-          Alert.alert(
-            'Bilgi', 
-            `Sözleşme bitiş tarihi gelecekte. "${selectedInstitution.name}" kurumu otomatik olarak aktif edildi.`
-          );
-          
-          // State'i güncelle
-          setSelectedInstitution({
-            ...selectedInstitution,
-            is_active: true
-          });
-        }
-      }
-      // Başlangıç tarihi gelecekte ise -> pasif et
-      else if (startDateOnly > today) {
-        await supabaseAdmin
-          .from('institutions')
-          .update({
-            is_active: false,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', selectedInstitution.id);
-
-        Alert.alert(
-          'Bilgi', 
-          `Sözleşme başlangıç tarihi gelecekte. "${selectedInstitution.name}" kurumu sözleşme başlangıcına kadar pasif kalacak.`
-        );
-      }
     }
     if (Platform.OS === 'ios') {
       // iOS'ta modal içinde kalır
@@ -536,84 +301,91 @@ const AdminInstitutionsScreen = ({ navigation }) => {
 
     setSaving(true);
     try {
-      const updateData = {
+      const result = await updateAdminContract(selectedInstitution.id, {
+        contract_start_date: contractData.contract_start_date || null,
+        contract_end_date: contractData.contract_end_date || null,
         payment_status: contractData.payment_status,
-      };
+        notes: contractData.notes || null,
+      });
 
-      // Tarihler varsa ekle
-      if (contractData.contract_start_date) {
-        updateData.contract_start_date = contractData.contract_start_date;
-      }
-      if (contractData.contract_end_date) {
-        updateData.contract_end_date = contractData.contract_end_date;
+      if (result.error) {
+        throw new Error(result.error?.message || result.error || 'Sözleşme güncellenemedi');
       }
 
-      // Notes için ayrı bir alan varsa eklenebilir (şimdilik institutions tablosunda notes yoksa göz ardı edilir)
-      if (contractData.notes) {
-        updateData.notes = contractData.notes;
-      }
-
-      const { error } = await supabaseAdmin
-        .from('institutions')
-        .update(updateData)
-        .eq('id', selectedInstitution.id);
-
-      if (error) {
-        throw error;
-      }
-
-      // Güncelleme sonrası kurum durumunu kontrol et
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      
-      const startDateCheck = updateData.contract_start_date 
-        ? new Date(updateData.contract_start_date)
-        : new Date(2000, 0, 1);
-      startDateCheck.setHours(0, 0, 0, 0);
-      
-      const endDateCheck = updateData.contract_end_date 
-        ? new Date(updateData.contract_end_date)
-        : null;
-      if (endDateCheck) {
-        endDateCheck.setHours(0, 0, 0, 0);
-      }
-
-      // Sözleşme bitiş tarihi kontrolü - güncellenen kurumu kontrol et
-      await checkContractExpiry(selectedInstitution.id);
-      
-      // Eğer sözleşme geçerli ise (başlangıç <= bugün <= bitiş) ve kurum pasif ise, aktif et
-      if (startDateCheck <= today && endDateCheck && endDateCheck >= today) {
-        const { data: institutionCheck } = await supabaseAdmin
-          .from('institutions')
-          .select('is_active')
-          .eq('id', selectedInstitution.id)
-          .single();
-          
-        if (institutionCheck && !institutionCheck.is_active) {
-          await supabaseAdmin
-            .from('institutions')
-            .update({
-              is_active: true,
-              updated_at: new Date().toISOString()
-            })
-            .eq('id', selectedInstitution.id);
-
-          await supabaseAdmin
-            .from('institution_memberships')
-            .update({
-              is_active: true,
-              updated_at: new Date().toISOString()
-            })
-            .eq('institution_id', selectedInstitution.id);
-        }
-      }
-
-      Alert.alert('Başarılı', 'Sözleşme bilgileri güncellendi.');
+      const message = result.data?.message || 'Sözleşme bilgileri güncellendi.';
+      Alert.alert('Başarılı', message);
       setShowContractModal(false);
       loadInstitutions(); // Listeyi yenile
     } catch (error) {
       console.error('Sözleşme güncelleme hatası:', error);
-      Alert.alert('Hata', 'Sözleşme güncellenemedi: ' + error.message);
+      Alert.alert('Hata', `Sözleşme güncellenemedi: ${error?.message || 'Bilinmeyen hata'}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const openEditInstitution = (institution) => {
+    setSelectedInstitution(institution);
+    setEditFormData({
+      name: institution.name || '',
+      type: institution.type || 'school',
+      contact_email: institution.contact_email || '',
+      contact_phone: institution.contact_phone || '',
+      address: institution.address || '',
+      max_teachers: institution.max_teachers || 50,
+      max_students: institution.max_students || 500,
+      notes: institution.notes || '',
+      admin_username: institution.admin_username || '',
+      admin_password: '', // Boş bırak, değiştirilmeyecekse korunur
+    });
+    setShowEditForm(true);
+  };
+
+  const handleEditInstitution = async () => {
+    if (!selectedInstitution) return;
+
+    if (!editFormData.name.trim()) {
+      Alert.alert('Hata', 'Kurum adı gereklidir.');
+      return;
+    }
+    if (!editFormData.contact_email.trim()) {
+      Alert.alert('Hata', 'İletişim e-postası gereklidir.');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const result = await updateAdminInstitution(selectedInstitution.id, {
+        name: editFormData.name,
+        type: editFormData.type,
+        contact_email: editFormData.contact_email,
+        contact_phone: editFormData.contact_phone || null,
+        address: editFormData.address || null,
+        max_teachers: editFormData.max_teachers || 50,
+        max_students: editFormData.max_students || 500,
+        notes: editFormData.notes || null,
+        admin_username: editFormData.admin_username || null,
+        admin_password: editFormData.admin_password && editFormData.admin_password.trim() !== '' 
+          ? editFormData.admin_password 
+          : null, // Sadece değiştirilecekse gönder
+      });
+
+      if (result.error) {
+        throw new Error(result.error?.message || result.error || 'Kurum güncellenemedi');
+      }
+
+      const message = editFormData.admin_password && editFormData.admin_password.trim() !== '' 
+        ? 'Kurum bilgileri ve admin şifresi güncellendi!'
+        : 'Kurum bilgileri güncellendi!';
+
+      Alert.alert('Başarılı', message);
+      setShowEditForm(false);
+      setTimeout(() => {
+        loadInstitutions();
+      }, 500);
+    } catch (error) {
+      console.error('Kurum güncelleme hatası:', error);
+      Alert.alert('Hata', `Kurum güncellenemedi: ${error?.message || 'Bilinmeyen hata'}`);
     } finally {
       setSaving(false);
     }
@@ -678,6 +450,16 @@ const AdminInstitutionsScreen = ({ navigation }) => {
       </View>
 
       <View style={styles.institutionActions}>
+        <TouchableOpacity
+          style={[styles.actionButton, { backgroundColor: colors.warning + '20' }]}
+          onPress={() => openEditInstitution(institution)}
+        >
+          <Ionicons name="pencil" size={20} color={colors.warning} />
+          <Text style={[styles.actionButtonText, { color: colors.warning }]}>
+            Düzenle
+          </Text>
+        </TouchableOpacity>
+
         <TouchableOpacity
           style={[
             styles.actionButton,
@@ -955,6 +737,167 @@ const AdminInstitutionsScreen = ({ navigation }) => {
                 <Button
                   title="Tamam"
                   onPress={() => setShowCredentials(false)}
+                  style={[styles.saveButton, { backgroundColor: colors.primary }]}
+                />
+              </View>
+            </View>
+          </View>
+        </Modal>
+
+        {/* Kurum Düzenleme Modal */}
+        <Modal
+          visible={showEditForm}
+          transparent={true}
+          animationType="slide"
+          onRequestClose={() => setShowEditForm(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, { backgroundColor: colors.surface }]}>
+              <View style={styles.modalHeader}>
+                <Text style={[styles.modalTitle, { color: colors.textPrimary }]}>
+                  Kurum Düzenle
+                </Text>
+                <TouchableOpacity
+                  style={styles.closeButton}
+                  onPress={() => setShowEditForm(false)}
+                >
+                  <Ionicons name="close" size={24} color={colors.textSecondary} />
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView style={styles.modalBody}>
+                <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>
+                  {selectedInstitution?.name}
+                </Text>
+
+                <Input
+                  label="Kurum Adı *"
+                  value={editFormData.name}
+                  onChangeText={(text) => setEditFormData({ ...editFormData, name: text })}
+                  placeholder="Örnek: ABC Okulu"
+                />
+
+                <View style={styles.selectContainer}>
+                  <Text style={[styles.selectLabel, { color: colors.textPrimary }]}>
+                    Kurum Türü *
+                  </Text>
+                  <View style={styles.selectOptions}>
+                    {[
+                      { value: 'school', label: 'Okul' },
+                      { value: 'university', label: 'Üniversite' },
+                      { value: 'company', label: 'Şirket' },
+                      { value: 'individual', label: 'Bireysel' },
+                    ].map((option) => (
+                      <TouchableOpacity
+                        key={option.value}
+                        style={[
+                          styles.selectOption,
+                          editFormData.type === option.value && { backgroundColor: colors.primary + '20' }
+                        ]}
+                        onPress={() => setEditFormData({ ...editFormData, type: option.value })}
+                      >
+                        <Text style={[
+                          styles.selectOptionText,
+                          { color: editFormData.type === option.value ? colors.primary : colors.textPrimary }
+                        ]}>
+                          {option.label}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+
+                <Input
+                  label="İletişim E-postası *"
+                  value={editFormData.contact_email}
+                  onChangeText={(text) => setEditFormData({ ...editFormData, contact_email: text })}
+                  placeholder="ornek@okul.com"
+                  keyboardType="email-address"
+                />
+
+                <Input
+                  label="İletişim Telefonu"
+                  value={editFormData.contact_phone}
+                  onChangeText={(text) => setEditFormData({ ...editFormData, contact_phone: text })}
+                  placeholder="+90 555 123 45 67"
+                  keyboardType="phone-pad"
+                />
+
+                <Input
+                  label="Adres"
+                  value={editFormData.address}
+                  onChangeText={(text) => setEditFormData({ ...editFormData, address: text })}
+                  placeholder="Kurum adresi"
+                  multiline
+                  numberOfLines={3}
+                />
+
+                <View style={styles.limitsContainer}>
+                  <Input
+                    label="Maksimum Öğretmen"
+                    value={editFormData.max_teachers.toString()}
+                    onChangeText={(text) => setEditFormData({ ...editFormData, max_teachers: parseInt(text) || 50 })}
+                    placeholder="50"
+                    keyboardType="numeric"
+                    style={{ flex: 1, marginRight: 8 }}
+                  />
+                  <Input
+                    label="Maksimum Öğrenci"
+                    value={editFormData.max_students.toString()}
+                    onChangeText={(text) => setEditFormData({ ...editFormData, max_students: parseInt(text) || 500 })}
+                    placeholder="500"
+                    keyboardType="numeric"
+                    style={{ flex: 1, marginLeft: 8 }}
+                  />
+                </View>
+
+                <Input
+                  label="Notlar"
+                  value={editFormData.notes}
+                  onChangeText={(text) => setEditFormData({ ...editFormData, notes: text })}
+                  placeholder="Ek notlar"
+                  multiline
+                  numberOfLines={3}
+                />
+
+                <View style={styles.separator} />
+
+                <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>
+                  🔐 Kurum Admin Bilgileri
+                </Text>
+                <Text style={[styles.credentialsSubtitle, { color: colors.textSecondary, marginBottom: 16 }]}>
+                  Kurum yöneticisinin giriş bilgileri
+                </Text>
+
+                <Input
+                  label="Admin Kullanıcı Adı"
+                  value={editFormData.admin_username}
+                  onChangeText={(text) => setEditFormData({ ...editFormData, admin_username: text })}
+                  placeholder="Kurum admin kullanıcı adı"
+                />
+
+                <Input
+                  label="Yeni Admin Şifre"
+                  value={editFormData.admin_password}
+                  onChangeText={(text) => setEditFormData({ ...editFormData, admin_password: text })}
+                  placeholder="Yeni şifre atayın (boş bırakırsanız değişmez)"
+                  secureTextEntry
+                />
+                <Text style={[styles.credentialsNote, { color: colors.textSecondary }]}>
+                  💡 Şifre alanını boş bırakırsanız mevcut şifre korunur. Yeni şifre girerseniz o şifre aktif olur.
+                </Text>
+              </ScrollView>
+
+              <View style={styles.modalActions}>
+                <Button
+                  title="İptal"
+                  onPress={() => setShowEditForm(false)}
+                  style={[styles.cancelButton, { backgroundColor: colors.textSecondary }]}
+                />
+                <Button
+                  title={saving ? 'Güncelleniyor...' : 'Güncelle'}
+                  onPress={handleEditInstitution}
+                  disabled={saving}
                   style={[styles.saveButton, { backgroundColor: colors.primary }]}
                 />
               </View>
@@ -1397,6 +1340,11 @@ const createStyles = (colors) => StyleSheet.create({
   dateInputText: {
     fontSize: 16,
     flex: 1,
+  },
+  limitsContainer: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 16,
   },
 });
 

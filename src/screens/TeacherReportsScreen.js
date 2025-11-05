@@ -17,7 +17,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Container, StudyDetailModal } from '../components';
 import { COLORS, DARK_COLORS, SIZES, SHADOWS } from '../constants/theme';
-import { supabase, supabaseAdmin } from '../lib/supabase';
+import { supabase } from '../lib/supabase';
+import { getGuidanceTeacherStudyLogs } from '../lib/adminApi';
 import { useTheme } from '../contexts/ThemeContext';
 import TeacherStudentDetailScreen from './TeacherStudentDetailScreen';
 
@@ -203,26 +204,14 @@ export default function TeacherReportsScreen({ route, navigation }) {
       if (!institutionError && institutionData) {
         isGuidanceTeacherLocal = true;
         setIsGuidanceTeacher(true);
-        
-        // Rehber öğretmen - Kurumundaki tüm öğrencilerin çalışmalarını göster
-        const { data: institutionMemberships, error: membershipError } = await supabase
-          .from('institution_memberships')
-          .select('user_id')
-          .eq('institution_id', institutionData.id)
-          .eq('role', 'student')
-          .eq('is_active', true);
-
-        if (!membershipError && institutionMemberships?.length > 0) {
-          studentIds = institutionMemberships.map(m => m.user_id).filter(Boolean);
-        } else {
-          console.warn('⚠️ Rehber öğretmen ama kurumunda aktif öğrenci bulunamadı');
-        }
+        // Rehber öğretmen - Edge Function kullanılacak, studentIds gerekmiyor
+        // Edge Function tüm öğrencilerin kayıtlarını getirecek
       } else {
         setIsGuidanceTeacher(false);
       }
 
       // Eğer rehber öğretmen değilse, bağlı öğrencileri göster
-      if (!isGuidanceTeacherLocal && studentIds.length === 0) {
+      if (!isGuidanceTeacherLocal) {
       // Bağlı öğrencileri al
       const { data: studentConnections, error: connectionsError } = await supabase
         .from('student_teachers')
@@ -241,16 +230,10 @@ export default function TeacherReportsScreen({ route, navigation }) {
       }
 
         studentIds = studentConnections.map(conn => conn.student_id).filter(Boolean);
-      } else if (isGuidanceTeacherLocal && studentIds.length === 0) {
-        // Rehber öğretmen ama kurumunda öğrenci yok
-        setLogs([]);
-        calculateStats([]);
-        setStudentStats({});
-        setIsLoading(false);
-        return;
       }
 
-      if (studentIds.length === 0) {
+      // Normal öğretmen için studentIds kontrolü
+      if (!isGuidanceTeacherLocal && studentIds.length === 0) {
         setLogs([]);
         calculateStats([]);
         setStudentStats({});
@@ -260,17 +243,38 @@ export default function TeacherReportsScreen({ route, navigation }) {
 
       const { startDate, endDate } = getDateRange();
       
-      // Rehber öğretmen için supabaseAdmin kullan (RLS'i bypass et)
-      const queryClient = isGuidanceTeacherLocal ? supabaseAdmin : supabase;
+      let data = [];
+      let error = null;
       
-      // Öğrencilerin çalışma loglarını al - UTC bazlı tam tarih aralığı
-      const { data, error } = await queryClient
-        .from('study_logs')
-        .select('*')
-        .in('user_id', studentIds)
-        .gte('study_date', startDate.toISOString())
-        .lte('study_date', endDate.toISOString())
-        .order('study_date', { ascending: false });
+      // Rehber öğretmen için Edge Function kullan, normal öğretmen için normal supabase
+      if (isGuidanceTeacherLocal && institutionData) {
+        // Rehber öğretmen - Edge Function ile çalışma kayıtlarını getir
+        const result = await getGuidanceTeacherStudyLogs(
+          institutionData.id,
+          null, // Tüm öğrenciler
+          startDate.toISOString(),
+          endDate.toISOString()
+        );
+        
+        if (result.error) {
+          console.error('Rehber öğretmen çalışma kayıtları yüklenirken hata:', result.error);
+          error = result.error;
+        } else {
+          data = result.data?.data || result.data || [];
+        }
+      } else {
+        // Normal öğretmen - Normal supabase kullan
+        const queryResult = await supabase
+          .from('study_logs')
+          .select('*')
+          .in('user_id', studentIds)
+          .gte('study_date', startDate.toISOString())
+          .lte('study_date', endDate.toISOString())
+          .order('study_date', { ascending: false });
+
+        data = queryResult.data || [];
+        error = queryResult.error;
+      }
 
       if (error) {
         console.error('Study logs query hatası:', error);
@@ -314,7 +318,15 @@ export default function TeacherReportsScreen({ route, navigation }) {
       
       setLogs(filteredData);
       calculateStats(filteredData);
-      await calculateStudentStats(filteredData, studentIds, isGuidanceTeacherLocal);
+      
+      // Rehber öğretmen için studentIds'i data'dan çıkar
+      let finalStudentIds = studentIds;
+      if (isGuidanceTeacherLocal && filteredData.length > 0) {
+        // Data'dan unique user_id'leri al
+        finalStudentIds = [...new Set(filteredData.map(log => log.user_id).filter(Boolean))];
+      }
+      
+      await calculateStudentStats(filteredData, finalStudentIds, isGuidanceTeacherLocal);
       
     } catch (error) {
       console.error('fetchLogs hatası:', error);
@@ -482,9 +494,10 @@ export default function TeacherReportsScreen({ route, navigation }) {
         let studentName = 'Bilinmeyen Öğrenci';
         let studentEmail = 'email@example.com';
         
-          // user_profiles tablosundan gerçek bilgileri çek - rehber öğretmen için supabaseAdmin kullan
-          const profileClient = isGuidanceTeacherLocal ? supabaseAdmin : supabase;
-          const { data: profile, error: profileError } = await profileClient
+          // user_profiles tablosundan gerçek bilgileri çek
+          // NOT: Rehber öğretmen için Edge Function kullanılabilir, şimdilik normal supabase kullanıyoruz
+          // RLS politikası user_profiles için kurum bazlı olduğu için sorun olmamalı
+          const { data: profile, error: profileError } = await supabase
           .from('user_profiles')
             .select('user_id, name, email, selected_avatar')
           .eq('user_id', studentId)

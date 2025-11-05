@@ -21,7 +21,9 @@ import Container from '../components/Container';
 import Card from '../components/Card';
 import Input from '../components/Input';
 import Button from '../components/Button';
-import { supabase, supabaseAdmin } from '../lib/supabase';
+import { supabase } from '../lib/supabase';
+import { getInstitutionAdminGuidanceTeacher, setInstitutionAdminGuidanceTeacher, addInstitutionAdminTeacher, addInstitutionAdminStudent, deleteInstitutionAdminUser, resetInstitutionAdminUserPassword, updateInstitutionAdminUser, changeInstitutionAdminPassword } from '../lib/adminApi';
+// ⚠️ supabaseAdmin artık kullanılmıyor - InstitutionAdminScreen için Edge Functions kullanılmalı
 
 const InstitutionAdminScreen = ({ route }) => {
   const navigation = useNavigation();
@@ -87,6 +89,15 @@ const InstitutionAdminScreen = ({ route }) => {
   });
   const [editUserLoading, setEditUserLoading] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false); // Logout durumu için flag
+  
+  // Şifre değiştirme states
+  const [showChangePassword, setShowChangePassword] = useState(false);
+  const [changePasswordForm, setChangePasswordForm] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: ''
+  });
+  const [changingPassword, setChangingPassword] = useState(false);
 
   useEffect(() => {
     checkSessionAndLoadData();
@@ -259,11 +270,7 @@ const InstitutionAdminScreen = ({ route }) => {
           setInstitution(institutionData);
           
           // Rehber öğretmen bilgisini yükle
-          if (institutionData.guidance_teacher_id) {
-            await loadGuidanceTeacher(institutionData.guidance_teacher_id);
-          } else {
-            setGuidanceTeacher(null);
-          }
+          await loadGuidanceTeacher();
         }
       }
       
@@ -335,65 +342,47 @@ const InstitutionAdminScreen = ({ route }) => {
   };
 
   // Rehber öğretmen bilgisini yükle
-  const loadGuidanceTeacher = async (teacherId) => {
-    if (!teacherId) {
-      setGuidanceTeacher(null);
-      return;
-    }
-
+  const loadGuidanceTeacher = async () => {
     try {
-      // Önce teachers tablosundan öğretmen bilgisini al
-      const { data: teacherData, error: teacherError } = await supabaseAdmin
-        .from('teachers')
-        .select('id, user_id, name, email')
-        .eq('id', teacherId)
-        .maybeSingle();
-
-      if (teacherError) {
-        console.error('Teachers query error:', teacherError);
+      // Kurum ID'sini al
+      let institutionId = institution?.id || institution?.institution_id;
+      if (!institutionId) {
+        const sessionData = await AsyncStorage.getItem('institutionAdminSession');
+        if (sessionData) {
+          const session = JSON.parse(sessionData);
+          institutionId = session.institutionId;
+        }
       }
 
-      if (!teacherData) {
-        // Eğer teachers tablosunda yoksa, user_profiles'den kontrol et
-        const { data: institutionData } = await supabaseAdmin
-          .from('institutions')
-          .select('guidance_teacher_id')
-          .eq('guidance_teacher_id', teacherId)
-          .single();
-        
-        if (institutionData?.guidance_teacher_id) {
-          // teacher_id ile user_profiles'den bilgi al
-          // Ancak teacher_id direkt user_profiles'e bağlı değil, teachers tablosu üzerinden
-        }
-        
+      if (!institutionId) {
+        console.error('loadGuidanceTeacher: institutionId bulunamadı');
         setGuidanceTeacher(null);
         return;
       }
 
-      // user_profiles'den isim ve email bilgisini al (eğer teachers'da yoksa)
-      let teacherName = teacherData.name;
-      let teacherEmail = teacherData.email;
-
-      if (!teacherName || !teacherEmail) {
-        const { data: userProfile, error: profileError } = await supabaseAdmin
-          .from('user_profiles')
-          .select('name, email')
-          .eq('user_id', teacherData.user_id)
-          .maybeSingle();
-
-        if (!profileError && userProfile) {
-          teacherName = teacherName || userProfile.name || 'Bilinmeyen Öğretmen';
-          teacherEmail = teacherEmail || userProfile.email || '';
-        }
+      // Edge Function kullan - session'dan admin username'i al
+      let adminUsername = null;
+      const sessionData = await AsyncStorage.getItem('institutionAdminSession');
+      if (sessionData) {
+        const session = JSON.parse(sessionData);
+        adminUsername = session.adminUsername || null;
+      }
+      
+      const result = await getInstitutionAdminGuidanceTeacher(institutionId, adminUsername);
+      
+      if (result.error) {
+        console.error('Rehber öğretmen yükleme hatası:', result.error);
+        setGuidanceTeacher(null);
+        return;
       }
 
-      const guidanceTeacherData = {
-        id: teacherData.id,
-        user_id: teacherData.user_id,
-        name: teacherName || 'Bilinmeyen Öğretmen',
-        email: teacherEmail || '',
-      };
-
+      // Edge Function'dan dönen veriyi kontrol et
+      const guidanceTeacherData = result.data;
+      
+      if (guidanceTeacherData && !guidanceTeacherData.name) {
+        console.warn('Rehber öğretmen verisi name alanı eksik:', guidanceTeacherData);
+      }
+      
       setGuidanceTeacher(guidanceTeacherData);
     } catch (error) {
       console.error('Rehber öğretmen yükleme hatası:', error);
@@ -427,37 +416,38 @@ const InstitutionAdminScreen = ({ route }) => {
     }
 
     try {
-      const { data, error } = await supabaseAdmin
-        .from('institutions')
-        .update({ guidance_teacher_id: teacherId })
-        .eq('id', institutionId)
-        .select()
-        .single();
+      // Admin username'i al (session'dan)
+      let adminUsername = null;
+      const sessionData = await AsyncStorage.getItem('institutionAdminSession');
+      if (sessionData) {
+        const session = JSON.parse(sessionData);
+        adminUsername = session.adminUsername || null;
+      }
 
-      if (error) {
-        console.error('Rehber öğretmen atama hatası (update):', error);
-        throw error;
+      // Edge Function kullan
+      const result = await setInstitutionAdminGuidanceTeacher(institutionId, teacherId, adminUsername);
+
+      if (result.error) {
+        console.error('Rehber öğretmen atama hatası:', result.error);
+        Alert.alert('Hata', result.error.message || 'Rehber öğretmen atanırken bir hata oluştu');
+        return;
       }
 
       // Institution state'ini güncelle
-      if (data) {
+      if (result.data) {
         setInstitution(prev => ({ ...prev, guidance_teacher_id: teacherId }));
       }
 
       // Rehber öğretmen bilgisini yenile
-      if (teacherId) {
-        await loadGuidanceTeacher(teacherId);
-        
-        // Biraz bekle ve tekrar kontrol et (state güncellenmesi için)
-        setTimeout(async () => {
-          await loadGuidanceTeacher(teacherId);
-        }, 500);
-      } else {
-        setGuidanceTeacher(null);
-      }
+      await loadGuidanceTeacher();
+      
+      // Biraz bekle ve tekrar kontrol et (state güncellenmesi için)
+      setTimeout(async () => {
+        await loadGuidanceTeacher();
+      }, 500);
 
-      // Institution state'ini güncelle (guidance_teacher_id'yi içerir)
-      const { data: updatedInstitution } = await supabaseAdmin
+      // Kurum bilgilerini yenile
+      const { data: updatedInstitution } = await supabase
         .from('institutions')
         .select('*')
         .eq('id', institutionId)
@@ -698,33 +688,72 @@ const InstitutionAdminScreen = ({ route }) => {
         }
 
         if (userProfiles && userProfiles.length > 0) {
-          const studentData = await Promise.all(
+          // Promise.allSettled kullanarak tüm query'lerin tamamlanmasını bekle
+          // Böylece bir query başarısız olsa bile diğerleri devam eder
+          const studentDataResults = await Promise.allSettled(
             userProfiles.map(async (profile) => {
-              const { data: studentInfo, error: studentError } = await supabase
-                .from('students')
-                .select('school, grade, phone, parent_name, parent_phone, address, notes')
-                .eq('user_id', profile.user_id)
-                .single();
+              try {
+                const { data: studentInfo, error: studentError } = await supabase
+                  .from('students')
+                  .select('school, grade, phone, parent_name, parent_phone, address, notes')
+                  .eq('user_id', profile.user_id)
+                  .single();
 
-              if (studentError) {
-                console.error('loadStudents: studentInfo error for user_id:', profile.user_id, studentError);
+                if (studentError) {
+                  // Network hatası veya diğer hatalar için sadece log'la, devam et
+                  const errorMessage = studentError?.message || studentError?.toString() || 'Bilinmeyen hata';
+                  console.error('loadStudents: studentInfo error for user_id:', profile.user_id, errorMessage);
+                  
+                  // Hata durumunda varsayılan değerlerle devam et
+                  return {
+                    ...profile,
+                    grade: 'Sınıf belirtilmemiş',
+                    phone: '-',
+                    school: '-',
+                    parent_name: '-',
+                    parent_phone: '-',
+                    address: '-',
+                    notes: '-'
+                  };
+                }
+
+                return {
+                  ...profile,
+                  grade: studentInfo?.grade || 'Sınıf belirtilmemiş',
+                  phone: studentInfo?.phone || '-',
+                  school: studentInfo?.school || '-',
+                  parent_name: studentInfo?.parent_name || '-',
+                  parent_phone: studentInfo?.parent_phone || '-',
+                  address: studentInfo?.address || '-',
+                  notes: studentInfo?.notes || '-',
+                  ...studentInfo
+                };
+              } catch (error) {
+                // Beklenmeyen hatalar için de varsayılan değerlerle devam et
+                const errorMessage = error?.message || error?.toString() || 'Bilinmeyen hata';
+                console.error('loadStudents: Unexpected error for user_id:', profile.user_id, errorMessage);
+                
+                return {
+                  ...profile,
+                  grade: 'Sınıf belirtilmemiş',
+                  phone: '-',
+                  school: '-',
+                  parent_name: '-',
+                  parent_phone: '-',
+                  address: '-',
+                  notes: '-'
+                };
               }
-
-              return {
-                ...profile,
-                grade: studentInfo?.grade || 'Sınıf belirtilmemiş',
-                phone: studentInfo?.phone || '-',
-                school: studentInfo?.school || '-',
-                parent_name: studentInfo?.parent_name || '-',
-                parent_phone: studentInfo?.parent_phone || '-',
-                address: studentInfo?.address || '-',
-                notes: studentInfo?.notes || '-',
-                ...studentInfo
-              };
             })
           );
 
-          setStudents(studentData.sort((a, b) => a.name.localeCompare(b.name)));
+          // Promise.allSettled sonuçlarını işle
+          const studentData = studentDataResults
+            .filter(result => result.status === 'fulfilled')
+            .map(result => result.value)
+            .filter(Boolean); // null/undefined değerleri filtrele
+
+          setStudents(studentData.sort((a, b) => (a?.name || '').localeCompare(b?.name || '')));
         } else {
           setStudents([]);
         }
@@ -739,898 +768,275 @@ const InstitutionAdminScreen = ({ route }) => {
     }
   };
 
-  const addTeacher = async () => {
+  const addTeacher = async (deactivateOtherInstitutions = false) => {
     // Form validasyonu
     if (!teacherForm.firstName || !teacherForm.lastName || !teacherForm.email || !teacherForm.branch) {
       Alert.alert('Hata', 'Ad, soyad, e-posta ve branş alanları zorunludur!');
       return;
     }
 
-    // Kurum limit kontrolü
-    try {
-      if (institution) {
-        const { data: memberships } = await supabase
-          .from('institution_memberships')
-          .select('user_id')
-          .eq('institution_id', institution.id);
-
-        if (memberships) {
-          const userIds = memberships.map(m => m.user_id);
-          const { data: userProfiles } = await supabase
-            .from('user_profiles')
-            .select('user_type')
-            .in('user_id', userIds);
-
-          const currentTeacherCount = userProfiles?.filter(p => p.user_type === 'teacher').length || 0;
-
-          if (currentTeacherCount >= institution.max_teachers) {
-            Alert.alert(
-              'Limit Aşıldı!',
-              `${institution.name} kurumunda öğretmen limiti (${institution.max_teachers}) aşıldı.\n\nMevcut: ${currentTeacherCount}/${institution.max_teachers}\n\nDaha fazla öğretmen eklemek için geliştirici ile iletişime geçin.`,
-              [{ text: 'Tamam' }]
-            );
-            return;
-          }
-        }
-      }
-    } catch (error) {
-      console.error('Limit kontrolü hatası:', error);
-    }
-
-    setTeacherLoading(true);
-    try {
-      // Önce bu e-postayla bir kullanıcı var mı kontrol et
-      let targetUserId = null;
-      
-      // E-posta ile mevcut kullanıcıyı bul
-      const { data: existingProfile } = await supabase
-        .from('user_profiles')
-        .select('user_id, email')
-        .eq('email', teacherForm.email.toLowerCase().trim())
-        .maybeSingle();
-
-      let newUser = null;
-      if (existingProfile) {
-        // Kullanıcı zaten var - mevcut kullanıcıyı kullan
-        targetUserId = existingProfile.user_id;
-        
-        // Bu kullanıcının başka kurumlarda aktif üyeliği var mı kontrol et
-        const { data: existingMemberships } = await supabase
-          .from('institution_memberships')
-          .select('institution_id, is_active, institutions(name)')
-          .eq('user_id', targetUserId)
-          .eq('is_active', true);
-
-          if (existingMemberships && existingMemberships.length > 0) {
-          const otherInstitutions = existingMemberships
-            .map(m => m.institutions?.name || 'Bilinmeyen Kurum')
-            .join(', ');
-
-          if (otherInstitutions) {
-            Alert.alert(
-              'Dikkat!',
-              `Bu öğretmen zaten "${otherInstitutions}" kurum(lar)ında aktif üyeliğe sahip.\n\nBu öğretmeni bu kuruma eklemek için önceki kurum üyelikleri pasif edilecek. Devam etmek istiyor musunuz?`,
-              [
-                { text: 'İptal', style: 'cancel', onPress: () => {
-                  setTeacherLoading(false);
-                  return;
-                }},
-                {
-                  text: 'Devam Et',
-                  onPress: async () => {
-                    try {
-                      // Eski aktif üyelikleri pasif et
-                      await supabaseAdmin
-                        .from('institution_memberships')
-                        .update({ is_active: false })
-                        .eq('user_id', targetUserId)
-                        .neq('institution_id', currentInstitutionId);
-                      
-                      // user_profiles tablosunda institution_id güncelle
-                      const { error: profileUpdateError } = await supabaseAdmin
-                        .from('user_profiles')
-                        .update({ institution_id: currentInstitutionId })
-                        .eq('user_id', targetUserId);
-
-                      if (profileUpdateError) {
-                        console.error('Alert callback: user_profiles institution_id güncelleme hatası:', profileUpdateError);
-                        // Kritik değil, devam et
-                      }
-                      
-                      // Teachers tablosunda kayıt var mı kontrol et
-                      const { data: existingTeacher } = await supabaseAdmin
-                        .from('teachers')
-                        .select('id')
-                        .eq('user_id', targetUserId)
-                        .maybeSingle();
-
-                      if (!existingTeacher) {
-                        // Teachers tablosunda kayıt yoksa oluştur
-                        const { data: insertedTeacher, error: teacherError } = await supabaseAdmin
-                          .from('teachers')
-                          .insert({
-                            user_id: targetUserId,
-                            branch: teacherForm.branch,
-                            phone: teacherForm.phone,
-                            experience: teacherForm.experience,
-                            education: teacherForm.education,
-                            address: teacherForm.address,
-                            notes: teacherForm.notes,
-                            institution_id: currentInstitutionId
-                          })
-                          .select()
-                          .single();
-
-                        if (teacherError) {
-                          console.error('Alert callback: teachers insert hatası:', teacherError);
-                          throw new Error(`Öğretmen kaydı oluşturulamadı: ${teacherError.message}`);
-                        }
-
-                        if (!insertedTeacher) {
-                          throw new Error('Öğretmen kaydı oluşturulamadı');
-                        }
-
-                      } else {
-                        // Varsa güncelle
-                        const { error: updateError } = await supabaseAdmin
-                          .from('teachers')
-                          .update({
-                            branch: teacherForm.branch,
-                            phone: teacherForm.phone,
-                            experience: teacherForm.experience,
-                            education: teacherForm.education,
-                            address: teacherForm.address,
-                            notes: teacherForm.notes,
-                            institution_id: currentInstitutionId
-                          })
-                          .eq('id', existingTeacher.id);
-
-                        if (updateError) {
-                          console.error('Alert callback: teachers update hatası:', updateError);
-                          throw new Error(`Öğretmen kaydı güncellenemedi: ${updateError.message}`);
-                        }
-                      }
-                      
-                      // Yeni kurum üyeliğini oluştur
-                      await createTeacherMembership(targetUserId);
-
-                      Alert.alert('Başarılı!', 'Öğretmen başarıyla eklendi. Önceki kurum üyelikleri pasif edildi.');
-                      setShowAddTeacher(false);
-                      setTeacherForm({
-                        firstName: '',
-                        lastName: '',
-                        email: '',
-                        branch: '',
-                        phone: '',
-                        experience: '',
-                        education: '',
-                        address: '',
-                        notes: ''
-                      });
-                      // İstatistikleri ve listeleri yenile
-                      // Kısa bir gecikme ekle - veritabanı sync'i için
-                      setTimeout(async () => {
-                        await loadTeachers();
-                        await loadStatsData(institution.id || institution.institution_id);
-                      }, 500);
-                    } catch (error) {
-                      console.error('Öğretmen ekleme hatası:', error);
-                      Alert.alert('Hata', 'Öğretmen eklenirken bir hata oluştu.');
-                    } finally {
-                      setTeacherLoading(false);
-                    }
-                  }
-                }
-              ]
-            );
-            return; // Alert callback'inde devam edilecek
-          }
-        }
-        
-        // Eğer bu kurumda pasif üyelik varsa, onu aktif et ve güncelle
-        if (currentInstitutionMembership) {
-          // Pasif üyeliği aktif et
-          const { error: activateError } = await supabaseAdmin
-            .from('institution_memberships')
-            .update({ 
-              is_active: true,
-              joined_at: new Date().toISOString()
-            })
-            .eq('id', currentInstitutionMembership.id);
-
-          if (activateError) {
-            console.error('Pasif üyelik aktif edilirken hata:', activateError);
-            throw activateError;
-          }
-
-        }
-        
-        // Mevcut kullanıcı için user_profiles tablosunu güncelle (institution_id ekle)
-        // currentInstitutionId yukarıda tanımlandı
-
-        // user_profiles tablosunda institution_id güncelle
-        const { error: profileUpdateError } = await supabaseAdmin
-          .from('user_profiles')
-          .update({ institution_id: currentInstitutionId })
-          .eq('user_id', targetUserId);
-
-        if (profileUpdateError) {
-          console.error('user_profiles institution_id güncelleme hatası:', profileUpdateError);
-          // Kritik değil, devam et
-        }
-
-        // Mevcut kullanıcı için teachers tablosunda kayıt var mı kontrol et
-        const { data: existingTeacher } = await supabaseAdmin
-          .from('teachers')
-          .select('id')
-          .eq('user_id', targetUserId)
-          .maybeSingle();
-
-        if (!existingTeacher) {
-          // Teachers tablosunda kayıt yoksa oluştur
-          const { data: insertedTeacher, error: teacherError } = await supabaseAdmin
-            .from('teachers')
-            .insert({
-              user_id: targetUserId,
-              branch: teacherForm.branch,
-              phone: teacherForm.phone,
-              experience: teacherForm.experience,
-              education: teacherForm.education,
-              address: teacherForm.address,
-              notes: teacherForm.notes,
-              institution_id: currentInstitutionId
-            })
-            .select()
-            .single();
-
-          if (teacherError) {
-            console.error('Mevcut kullanıcı için teachers insert hatası:', teacherError);
-            throw new Error(`Öğretmen kaydı oluşturulamadı: ${teacherError.message}`);
-          }
-
-          if (!insertedTeacher) {
-            throw new Error('Öğretmen kaydı oluşturulamadı');
-          }
-
-        } else {
-          // Varsa güncelle
-          const { error: updateError } = await supabaseAdmin
-            .from('teachers')
-            .update({
-              branch: teacherForm.branch,
-              phone: teacherForm.phone,
-              experience: teacherForm.experience,
-              education: teacherForm.education,
-              address: teacherForm.address,
-              notes: teacherForm.notes,
-              institution_id: currentInstitutionId
-            })
-            .eq('id', existingTeacher.id);
-
-          if (updateError) {
-            console.error('Mevcut kullanıcı için teachers update hatası:', updateError);
-            throw new Error(`Öğretmen kaydı güncellenemedi: ${updateError.message}`);
-          }
-        }
-        
-        // Başka kurumda aktif üyelik yoksa ve bu kurumda pasif üyelik de yoksa yeni üyelik oluştur
-        if (!currentInstitutionMembership) {
-          await createTeacherMembership(targetUserId);
-        }
-        
-        Alert.alert('Başarılı!', 'Öğretmen başarıyla eklendi.');
-        setShowAddTeacher(false);
-        setTeacherForm({
-          firstName: '',
-          lastName: '',
-          email: '',
-          branch: '',
-          phone: '',
-          experience: '',
-          education: '',
-          address: '',
-          notes: ''
-        });
-        // İstatistikleri ve listeleri yenile
-        // Kısa bir gecikme ekle - veritabanı sync'i için
-        setTimeout(async () => {
-          await loadTeachers();
-          await loadStatsData(institution.id || institution.institution_id);
-        }, 500);
-      } else {
-        // Yeni kullanıcı oluştur
-        const { data: createdUser, error: authError } = await supabase.auth.signUp({
-          email: teacherForm.email,
-          password: 'teacher123',
-          options: {
-            data: {
-              first_name: teacherForm.firstName,
-              last_name: teacherForm.lastName,
-              user_type: 'teacher',
-              branch: teacherForm.branch,
-              phone: teacherForm.phone,
-              experience: teacherForm.experience,
-              education: teacherForm.education,
-              address: teacherForm.address,
-              notes: teacherForm.notes
-            }
-          }
-        });
-
-        if (authError) throw authError;
-        newUser = createdUser;
-        targetUserId = createdUser.user.id;
-
-        // User profile oluştur veya güncelle
-        let institutionId = institution?.id || institution?.institution_id;
-        if (!institutionId) {
-          const sessionData = await AsyncStorage.getItem('institutionAdminSession');
-          if (sessionData) {
-            const session = JSON.parse(sessionData);
-            institutionId = session.institutionId;
-          }
-        }
-
-        const { data: existingProfile } = await supabaseAdmin
-          .from('user_profiles')
-          .select('user_id')
-          .eq('user_id', targetUserId)
-          .maybeSingle();
-
-        if (!existingProfile) {
-          // Yeni profile oluştur
-          const { error: profileError } = await supabaseAdmin
-            .from('user_profiles')
-            .insert({
-              user_id: targetUserId,
-              name: `${teacherForm.firstName} ${teacherForm.lastName}`,
-              user_type: 'teacher',
-              email: teacherForm.email,
-              institution_id: institutionId
-            });
-
-          if (profileError) throw profileError;
-        } else {
-          // Mevcut profile'ı güncelle
-          const { error: updateError } = await supabaseAdmin
-            .from('user_profiles')
-            .update({
-              name: `${teacherForm.firstName} ${teacherForm.lastName}`,
-              email: teacherForm.email,
-              institution_id: institutionId
-            })
-            .eq('user_id', targetUserId);
-
-          if (updateError) throw updateError;
-        }
-
-        // Teacher bilgilerini kaydet - önce varsa kontrol et
-        const { data: existingTeacher } = await supabaseAdmin
-          .from('teachers')
-          .select('id')
-          .eq('user_id', targetUserId)
-          .maybeSingle();
-
-        if (!existingTeacher) {
-          // Öğretmen kodu oluştur (benzersiz)
-          const teacherCode = `T${Date.now()}${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
-          const teacherName = `${teacherForm.firstName} ${teacherForm.lastName}`.trim();
-          
-          const { data: insertedTeacher, error: teacherError } = await supabaseAdmin
-            .from('teachers')
-            .insert({
-              user_id: targetUserId,
-              name: teacherName, // Zorunlu alan
-              email: teacherForm.email, // Zorunlu olabilir
-              branch: teacherForm.branch,
-              phone: teacherForm.phone,
-              experience: teacherForm.experience,
-              education: teacherForm.education,
-              address: teacherForm.address,
-              notes: teacherForm.notes,
-              institution_id: institutionId,
-              teacher_code: teacherCode // Zorunlu alan
-            })
-            .select()
-            .single();
-
-          if (teacherError) {
-            console.error('Teachers insert hatası:', teacherError);
-            throw new Error(`Öğretmen kaydı oluşturulamadı: ${teacherError.message}`);
-          }
-
-          if (!insertedTeacher) {
-            throw new Error('Öğretmen kaydı oluşturulamadı: Kayıt oluşturuldu ama geri döndürülemedi');
-          }
-
-        } else {
-          // Zaten varsa güncelle
-          const teacherName = `${teacherForm.firstName} ${teacherForm.lastName}`.trim();
-          const { error: updateError } = await supabaseAdmin
-            .from('teachers')
-            .update({
-              name: teacherName, // Zorunlu alan
-              email: teacherForm.email,
-              branch: teacherForm.branch,
-              phone: teacherForm.phone,
-              experience: teacherForm.experience,
-              education: teacherForm.education,
-              address: teacherForm.address,
-              notes: teacherForm.notes,
-              institution_id: institutionId
-            })
-            .eq('id', existingTeacher.id);
-
-          if (updateError) {
-            console.error('Teachers update hatası:', updateError);
-            throw new Error(`Öğretmen kaydı güncellenemedi: ${updateError.message}`);
-          }
-        }
-
-        // Kurum üyeliği oluştur
-        await createTeacherMembership(targetUserId);
-
-        Alert.alert('Başarılı!', 'Öğretmen başarıyla eklendi.');
-        setShowAddTeacher(false);
-        setTeacherForm({
-          firstName: '',
-          lastName: '',
-          email: '',
-          branch: '',
-          phone: '',
-          experience: '',
-          education: '',
-          address: '',
-          notes: ''
-        });
-        // İstatistikleri ve listeleri yenile
-        // Kısa bir gecikme ekle - veritabanı sync'i için
-        setTimeout(async () => {
-          await loadTeachers();
-          await loadStatsData(institution.id || institution.institution_id);
-        }, 500);
-      }
-    } catch (error) {
-      console.error('Öğretmen ekleme hatası:', error);
-      Alert.alert('Hata', 'Öğretmen eklenirken bir hata oluştu.');
-    } finally {
-      setTeacherLoading(false);
-    }
-  };
-
-  // Öğretmen kurum üyeliği oluşturma fonksiyonu
-  const createTeacherMembership = async (userId) => {
     let institutionId = institution?.id || institution?.institution_id;
-    
     if (!institutionId) {
-      // Institution henüz yüklenmemişse session'dan al
       const sessionData = await AsyncStorage.getItem('institutionAdminSession');
       if (sessionData) {
         const session = JSON.parse(sessionData);
         institutionId = session.institutionId;
       }
     }
-    
+
     if (!institutionId) {
-      throw new Error('Kurum bilgisi bulunamadı');
+      Alert.alert('Hata', 'Kurum bilgisi bulunamadı.');
+      return;
     }
 
-    // Önce bu kurumda zaten üyelik var mı kontrol et
-    const { data: existingMembership } = await supabaseAdmin
-      .from('institution_memberships')
-      .select('id')
-      .eq('user_id', userId)
-      .eq('institution_id', institutionId)
-      .maybeSingle();
+    setTeacherLoading(true);
+    try {
+      // Admin username'i al (session'dan)
+      let adminUsername = null;
+      const sessionData = await AsyncStorage.getItem('institutionAdminSession');
+      if (sessionData) {
+        const session = JSON.parse(sessionData);
+        adminUsername = session.adminUsername || null;
+      }
 
-    if (existingMembership) {
-      // Zaten üyelik varsa aktif et
-      const { error: updateError } = await supabaseAdmin
-        .from('institution_memberships')
-        .update({ is_active: true, joined_at: new Date().toISOString() })
-        .eq('id', existingMembership.id);
+      // Edge Function kullan
+      const result = await addInstitutionAdminTeacher(
+        institutionId,
+        {
+          firstName: teacherForm.firstName,
+          lastName: teacherForm.lastName,
+          email: teacherForm.email,
+          branch: teacherForm.branch,
+          phone: teacherForm.phone,
+          experience: teacherForm.experience,
+          education: teacherForm.education,
+          address: teacherForm.address,
+          notes: teacherForm.notes,
+        },
+        deactivateOtherInstitutions,
+        adminUsername
+      );
+
+      console.log('[DEBUG] addTeacher result:', {
+        hasData: !!result.data,
+        hasError: !!result.error,
+        errorMessage: result.error?.message,
+        errorDetails: result.error,
+        dataKeys: result.data ? Object.keys(result.data) : [],
+        dataMessage: result.data?.message,
+        dataType: typeof result.data
+      });
+
+      if (result.error) {
+        // Limit kontrolü hatası
+        if (result.error.limit_reached) {
+          Alert.alert(
+            'Limit Aşıldı!',
+            `${result.error.institution_name || institution?.name} kurumunda öğretmen limiti (${result.error.max_count}) aşıldı.\n\nMevcut: ${result.error.current_count}/${result.error.max_count}\n\nDaha fazla öğretmen eklemek için geliştirici ile iletişime geçin.`,
+            [{ text: 'Tamam' }]
+          );
+          setTeacherLoading(false);
+          return;
+        }
+
+        // Başka kurumlarda üyelik var - onay isteniyor
+        if (result.data?.requires_confirmation) {
+          const confirmationMessage = result.data.message || 'Bu öğretmen zaten başka kurum(lar)ında aktif üyeliğe sahip. Önceki kurum üyelikleri pasif edilecek. Devam etmek istiyor musunuz?';
+          Alert.alert(
+            'Dikkat!',
+            confirmationMessage,
+            [
+              { 
+                text: 'İptal', 
+                style: 'cancel', 
+                onPress: () => {
+                  setTeacherLoading(false);
+                }
+              },
+              {
+                text: 'Devam Et',
+                onPress: () => {
+                  // Onay verildi, tekrar çağır - event objesini kullanmadan
+                  addTeacher(true);
+                }
+              }
+            ]
+          );
+          return;
+        }
+
+        // Diğer hatalar
+        Alert.alert('Hata', result.error.message || result.error || 'Öğretmen eklenirken bir hata oluştu.');
+        setTeacherLoading(false);
+        return;
+      }
+
+      // Başarılı
+      Alert.alert('Başarılı!', result.data?.message || 'Öğretmen başarıyla eklendi.');
+      setShowAddTeacher(false);
+      setTeacherForm({
+        firstName: '',
+        lastName: '',
+        email: '',
+        branch: '',
+        phone: '',
+        experience: '',
+        education: '',
+        address: '',
+        notes: ''
+      });
       
-      if (updateError) throw updateError;
-    } else {
-      // Yeni üyelik oluştur
-      const { error: membershipError } = await supabaseAdmin
-        .from('institution_memberships')
-        .insert({
-          user_id: userId,
-          institution_id: institutionId,
-          role: 'teacher',
-          joined_at: new Date().toISOString()
-        });
-
-      if (membershipError) throw membershipError;
+      // İstatistikleri ve listeleri yenile
+      setTimeout(async () => {
+        await loadTeachers();
+        await loadStatsData(institution.id || institution.institution_id);
+      }, 500);
+    } catch (error) {
+      // Error objesini güvenli şekilde log'la
+      const errorMessage = error?.message || error?.toString() || 'Bilinmeyen hata';
+      console.error('[ERROR] Öğretmen ekleme hatası:', errorMessage);
+      Alert.alert('Hata', `Öğretmen eklenirken bir hata oluştu: ${errorMessage}`);
+    } finally {
+      setTeacherLoading(false);
     }
   };
+
+  // Öğretmen kurum üyeliği oluşturma fonksiyonu (artık Edge Function içinde, burada kalmıyor)
+  // const createTeacherMembership - KALDIRILDI - Edge Function içinde yapılıyor
 
   // Öğrenci kurum üyeliği oluşturma fonksiyonu
-  const createStudentMembership = async (userId) => {
-    // Önce bu kurumda zaten üyelik var mı kontrol et
-    const { data: existingMembership } = await supabaseAdmin
-      .from('institution_memberships')
-      .select('id')
-      .eq('user_id', userId)
-      .eq('institution_id', institution.id)
-      .maybeSingle();
+  // ⚠️ KALDIRILDI - Artık Edge Function (institution-admin-add-student) içinde yapılıyor
+  // Bu fonksiyon artık kullanılmıyor, ancak kod geçmişi için burada bırakıldı
 
-    if (existingMembership) {
-      // Zaten üyelik varsa aktif et
-      const { error: updateError } = await supabaseAdmin
-        .from('institution_memberships')
-        .update({ is_active: true, joined_at: new Date().toISOString() })
-        .eq('id', existingMembership.id);
-      
-      if (updateError) throw updateError;
-    } else {
-      // Yeni üyelik oluştur
-      const { error: membershipError } = await supabaseAdmin
-        .from('institution_memberships')
-        .insert({
-          user_id: userId,
-          institution_id: institution.id,
-          role: 'student',
-          joined_at: new Date().toISOString()
-        });
-
-      if (membershipError) throw membershipError;
-    }
-  };
-
-  const addStudent = async () => {
+  const addStudent = async (deactivateOtherInstitutions = false) => {
     // Form validasyonu
     if (!studentForm.firstName || !studentForm.lastName || !studentForm.email) {
       Alert.alert('Hata', 'Ad, soyad ve e-posta alanları zorunludur!');
       return;
     }
 
-    // Kurum limit kontrolü
-    try {
-      if (institution) {
-        const { data: memberships } = await supabase
-          .from('institution_memberships')
-          .select('user_id')
-          .eq('institution_id', institution.id);
-
-        if (memberships) {
-          const userIds = memberships.map(m => m.user_id);
-          const { data: userProfiles } = await supabase
-            .from('user_profiles')
-            .select('user_type')
-            .in('user_id', userIds);
-
-          const currentStudentCount = userProfiles?.filter(p => p.user_type === 'student').length || 0;
-
-          if (currentStudentCount >= institution.max_students) {
-            Alert.alert(
-              'Limit Aşıldı!',
-              `${institution.name} kurumunda öğrenci limiti (${institution.max_students}) aşıldı.\n\nMevcut: ${currentStudentCount}/${institution.max_students}\n\nDaha fazla öğrenci eklemek için geliştirici ile iletişime geçin.`,
-              [{ text: 'Tamam' }]
-            );
-            return;
-          }
-        }
+    let institutionId = institution?.id || institution?.institution_id;
+    if (!institutionId) {
+      const sessionData = await AsyncStorage.getItem('institutionAdminSession');
+      if (sessionData) {
+        const session = JSON.parse(sessionData);
+        institutionId = session.institutionId;
       }
-    } catch (error) {
-      console.error('Limit kontrolü hatası:', error);
+    }
+
+    if (!institutionId) {
+      Alert.alert('Hata', 'Kurum bilgisi bulunamadı.');
+      return;
     }
 
     setStudentLoading(true);
     try {
-      // Önce bu e-postayla bir kullanıcı var mı kontrol et
-      let targetUserId = null;
-      
-      // E-posta ile mevcut kullanıcıyı bul
-      const { data: existingProfile } = await supabase
-        .from('user_profiles')
-        .select('user_id, email')
-        .eq('email', studentForm.email.toLowerCase().trim())
-        .maybeSingle();
-
-      let newUser = null;
-      if (existingProfile) {
-        // Kullanıcı zaten var - mevcut kullanıcıyı kullan
-        targetUserId = existingProfile.user_id;
-        
-        // Bu kullanıcının başka kurumlarda aktif üyeliği var mı kontrol et
-        const { data: existingMemberships } = await supabase
-          .from('institution_memberships')
-          .select('institution_id, is_active, institutions(name)')
-          .eq('user_id', targetUserId)
-          .eq('is_active', true);
-
-        if (existingMemberships && existingMemberships.length > 0) {
-          const otherInstitutions = existingMemberships
-            .filter(m => m.institution_id !== institution.id)
-            .map(m => m.institutions?.name || 'Bilinmeyen Kurum')
-            .join(', ');
-
-          if (otherInstitutions) {
-            Alert.alert(
-              'Dikkat!',
-              `Bu öğrenci zaten "${otherInstitutions}" kurum(lar)ında aktif üyeliğe sahip.\n\nBu öğrenciyi bu kuruma eklemek için önceki kurum üyelikleri pasif edilecek. Devam etmek istiyor musunuz?`,
-              [
-                { text: 'İptal', style: 'cancel', onPress: () => {
-                  setStudentLoading(false);
-                  return;
-                }},
-                {
-                  text: 'Devam Et',
-                  onPress: async () => {
-                    try {
-                      // Eski aktif üyelikleri pasif et
-                      await supabase
-                        .from('institution_memberships')
-                        .update({ is_active: false })
-                        .eq('user_id', targetUserId)
-                        .neq('institution_id', institution.id);
-                      
-                      // Yeni kurum üyeliğini oluştur
-                      await createStudentMembership(targetUserId);
-                      
-                      // Mevcut öğrencinin okul bilgisini güncelle (eğer students tablosunda kayıt varsa)
-                      const studentName = `${studentForm.firstName} ${studentForm.lastName}`;
-                      const { data: existingStudent } = await supabaseAdmin
-                        .from('students')
-                        .select('id')
-                        .eq('user_id', targetUserId)
-                        .maybeSingle();
-                      
-                      if (existingStudent) {
-                        // Mevcut kayıt varsa okul bilgisini güncelle
-                        await supabaseAdmin
-                          .from('students')
-                          .update({ 
-                            name: studentName,
-                            email: studentForm.email,
-                            school: institution?.name || '',
-                            grade: studentForm.grade || '',
-                            phone: studentForm.phone || '',
-                            parent_name: studentForm.parentName || '',
-                            parent_phone: studentForm.parentPhone || '',
-                            address: studentForm.address || '',
-                            notes: studentForm.notes || ''
-                          })
-                          .eq('user_id', targetUserId);
-                      } else {
-                        // Kayıt yoksa oluştur
-                        await supabaseAdmin
-                          .from('students')
-                          .insert({
-                            user_id: targetUserId,
-                            name: studentName,
-                            email: studentForm.email,
-                            school: institution?.name || '',
-                            grade: studentForm.grade || '',
-                            phone: studentForm.phone || '',
-                            parent_name: studentForm.parentName || '',
-                            parent_phone: studentForm.parentPhone || '',
-                            address: studentForm.address || '',
-                            notes: studentForm.notes || ''
-                          });
-                      }
-
-                      Alert.alert('Başarılı!', 'Öğrenci başarıyla eklendi. Önceki kurum üyelikleri pasif edildi.');
-                      setShowAddStudent(false);
-                      setStudentForm({
-                        firstName: '',
-                        lastName: '',
-                        email: '',
-                        grade: '',
-                        phone: '',
-                        parentName: '',
-                        parentPhone: '',
-                        address: '',
-                        notes: ''
-                      });
-                      // İstatistikleri ve listeleri yenile
-                      await loadStudents();
-                      await loadStatsData(institution.id || institution.institution_id);
-                    } catch (error) {
-                      console.error('Öğrenci ekleme hatası:', error);
-                      Alert.alert('Hata', 'Öğrenci eklenirken bir hata oluştu.');
-                    } finally {
-                      setStudentLoading(false);
-                    }
-                  }
-                }
-              ]
-            );
-            return; // Alert callback'inde devam edilecek
-          }
-        }
-        
-        // Başka kurumda aktif üyelik yoksa direkt yeni üyelik oluştur
-        await createStudentMembership(targetUserId);
-        
-        // Mevcut öğrencinin okul bilgisini güncelle (eğer students tablosunda kayıt varsa)
-        const studentNameForUpdate = `${studentForm.firstName} ${studentForm.lastName}`;
-        const { data: existingStudent } = await supabaseAdmin
-          .from('students')
-          .select('id')
-          .eq('user_id', targetUserId)
-          .maybeSingle();
-        
-        if (existingStudent) {
-          // Mevcut kayıt varsa okul bilgisini güncelle
-          await supabaseAdmin
-            .from('students')
-            .update({ 
-              name: studentNameForUpdate,
-              email: studentForm.email,
-              school: institution?.name || '',
-              grade: studentForm.grade || '',
-              phone: studentForm.phone || '',
-              parent_name: studentForm.parentName || '',
-              parent_phone: studentForm.parentPhone || '',
-              address: studentForm.address || '',
-              notes: studentForm.notes || ''
-            })
-            .eq('user_id', targetUserId);
-        } else {
-          // Kayıt yoksa oluştur
-          await supabaseAdmin
-            .from('students')
-            .insert({
-              user_id: targetUserId,
-              name: studentNameForUpdate,
-              email: studentForm.email,
-              school: institution?.name || '',
-              grade: studentForm.grade || '',
-              phone: studentForm.phone || '',
-              parent_name: studentForm.parentName || '',
-              parent_phone: studentForm.parentPhone || '',
-              address: studentForm.address || '',
-              notes: studentForm.notes || ''
-            });
-        }
-        
-        Alert.alert('Başarılı!', 'Öğrenci başarıyla eklendi.');
-        setShowAddStudent(false);
-        setStudentForm({
-          firstName: '',
-          lastName: '',
-          email: '',
-          grade: '',
-          phone: '',
-          parentName: '',
-          parentPhone: '',
-          address: '',
-          notes: ''
-        });
-        // İstatistikleri ve listeleri yenile
-        await loadStudents();
-        await loadStatsData(institution.id || institution.institution_id);
-      } else {
-        // Yeni kullanıcı oluştur
-        const { data: createdUser, error: authError } = await supabase.auth.signUp({
-          email: studentForm.email,
-          password: 'student123',
-          options: {
-            data: {
-              first_name: studentForm.firstName,
-              last_name: studentForm.lastName,
-              user_type: 'student',
-              school: institution?.name || '',
-              grade: studentForm.grade,
-              phone: studentForm.phone,
-              parent_name: studentForm.parentName,
-              parent_phone: studentForm.parentPhone,
-              address: studentForm.address,
-              notes: studentForm.notes
-            }
-          }
-        });
-
-        if (authError) throw authError;
-        newUser = createdUser;
-        targetUserId = createdUser.user.id;
-
-        // User profile oluştur veya güncelle (eğer varsa)
-        const { data: existingProfile } = await supabaseAdmin
-          .from('user_profiles')
-          .select('user_id')
-          .eq('user_id', targetUserId)
-          .maybeSingle();
-
-        if (existingProfile) {
-          // Mevcut profil varsa güncelle
-          const { error: profileError } = await supabaseAdmin
-            .from('user_profiles')
-            .update({
-              name: `${studentForm.firstName} ${studentForm.lastName}`,
-              user_type: 'student',
-              email: studentForm.email
-            })
-            .eq('user_id', targetUserId);
-          
-          if (profileError) throw profileError;
-        } else {
-          // Yeni profil oluştur
-          const { error: profileError } = await supabaseAdmin
-            .from('user_profiles')
-            .insert({
-              user_id: targetUserId,
-              name: `${studentForm.firstName} ${studentForm.lastName}`,
-              user_type: 'student',
-              email: studentForm.email
-            });
-
-          if (profileError) throw profileError;
-        }
-
-        // Student bilgilerini kaydet veya güncelle (eğer varsa)
-        const { data: existingStudentRecord } = await supabaseAdmin
-          .from('students')
-          .select('id')
-          .eq('user_id', targetUserId)
-          .maybeSingle();
-
-        const studentName = `${studentForm.firstName} ${studentForm.lastName}`;
-        
-        if (existingStudentRecord) {
-          // Mevcut kayıt varsa güncelle
-          const { error: studentError } = await supabaseAdmin
-            .from('students')
-            .update({
-              name: studentName,
-              email: studentForm.email,
-              school: institution?.name || '',
-              grade: studentForm.grade,
-              phone: studentForm.phone,
-              parent_name: studentForm.parentName,
-              parent_phone: studentForm.parentPhone,
-              address: studentForm.address,
-              notes: studentForm.notes
-            })
-            .eq('user_id', targetUserId);
-          
-          if (studentError) throw studentError;
-        } else {
-          // Yeni kayıt oluştur
-          const { error: studentError } = await supabaseAdmin
-            .from('students')
-            .insert({
-              user_id: targetUserId,
-              name: studentName,
-              email: studentForm.email,
-              school: institution?.name || '',
-              grade: studentForm.grade,
-              phone: studentForm.phone,
-              parent_name: studentForm.parentName,
-              parent_phone: studentForm.parentPhone,
-              address: studentForm.address,
-              notes: studentForm.notes
-            });
-
-          if (studentError) throw studentError;
-        }
-
-        // Kurum üyeliği oluştur
-        await createStudentMembership(targetUserId);
-
-        Alert.alert('Başarılı!', 'Öğrenci başarıyla eklendi.');
-        setShowAddStudent(false);
-        setStudentForm({
-          firstName: '',
-          lastName: '',
-          email: '',
-          grade: '',
-          phone: '',
-          parentName: '',
-          parentPhone: '',
-          address: '',
-          notes: ''
-        });
-        // İstatistikleri ve listeleri yenile
-        await loadStudents();
-        await loadStatsData(institution.id || institution.institution_id);
+      // Admin username'i al (session'dan)
+      let adminUsername = null;
+      const sessionData = await AsyncStorage.getItem('institutionAdminSession');
+      if (sessionData) {
+        const session = JSON.parse(sessionData);
+        adminUsername = session.adminUsername || null;
       }
+
+      // Edge Function kullan
+      const result = await addInstitutionAdminStudent(
+        institutionId,
+        {
+          firstName: studentForm.firstName,
+          lastName: studentForm.lastName,
+          email: studentForm.email,
+          grade: studentForm.grade,
+          phone: studentForm.phone,
+          parentName: studentForm.parentName,
+          parentPhone: studentForm.parentPhone,
+          address: studentForm.address,
+          notes: studentForm.notes,
+        },
+        deactivateOtherInstitutions,
+        adminUsername
+      );
+
+      console.log('[DEBUG] addStudent result:', {
+        hasData: !!result.data,
+        hasError: !!result.error,
+        errorMessage: result.error?.message,
+        errorDetails: result.error,
+        dataKeys: result.data ? Object.keys(result.data) : [],
+        dataMessage: result.data?.message,
+        dataType: typeof result.data
+      });
+
+      if (result.error) {
+        // Limit kontrolü hatası
+        if (result.error.limit_reached) {
+          Alert.alert(
+            'Limit Aşıldı!',
+            `${result.error.institution_name || institution?.name} kurumunda öğrenci limiti (${result.error.max_count}) aşıldı.\n\nMevcut: ${result.error.current_count}/${result.error.max_count}\n\nDaha fazla öğrenci eklemek için geliştirici ile iletişime geçin.`,
+            [{ text: 'Tamam' }]
+          );
+          setStudentLoading(false);
+          return;
+        }
+
+        // Başka kurumlarda üyelik var - onay isteniyor
+        if (result.data?.requires_confirmation) {
+          const confirmationMessage = result.data.message || 'Bu öğrenci zaten başka kurum(lar)ında aktif üyeliğe sahip. Önceki kurum üyelikleri pasif edilecek. Devam etmek istiyor musunuz?';
+          Alert.alert(
+            'Dikkat!',
+            confirmationMessage,
+            [
+              { 
+                text: 'İptal', 
+                style: 'cancel', 
+                onPress: () => {
+                  setStudentLoading(false);
+                }
+              },
+              {
+                text: 'Devam Et',
+                onPress: () => {
+                  // Onay verildi, tekrar çağır - event objesini kullanmadan
+                  addStudent(true);
+                }
+              }
+            ]
+          );
+          return;
+        }
+
+        // Diğer hatalar
+        const errorMessage = result.error?.message || result.error || 'Bilinmeyen hata';
+        Alert.alert('Hata', errorMessage);
+        setStudentLoading(false);
+        return;
+      }
+
+      // Başarılı
+      Alert.alert('Başarılı!', result.data?.message || 'Öğrenci başarıyla eklendi.');
+      setShowAddStudent(false);
+      setStudentForm({
+        firstName: '',
+        lastName: '',
+        email: '',
+        grade: '',
+        phone: '',
+        parentName: '',
+        parentPhone: '',
+        address: '',
+        notes: ''
+      });
+      
+      // İstatistikleri ve listeleri yenile
+      setTimeout(async () => {
+        await loadStudents();
+        await loadStatsData(institution.id || institution.institution_id);
+      }, 500);
     } catch (error) {
-      console.error('Öğrenci ekleme hatası:', error);
-      Alert.alert('Hata', 'Öğrenci eklenirken bir hata oluştu.');
+      // Error objesini güvenli şekilde log'la
+      const errorMessage = error?.message || error?.toString() || 'Bilinmeyen hata';
+      console.error('[ERROR] Öğrenci ekleme hatası:', errorMessage);
+      Alert.alert('Hata', `Öğrenci eklenirken bir hata oluştu: ${errorMessage}`);
     } finally {
       setStudentLoading(false);
     }
@@ -1674,71 +1080,62 @@ const InstitutionAdminScreen = ({ route }) => {
   const updateUser = async () => {
     if (!selectedUser) return;
 
+    // Kullanıcı tipini güncellemeden önce kaydet (selectedUser null yapıldıktan sonra erişilemez)
+    const isTeacher = !!selectedUser.branch;
+    const userId = selectedUser.user_id;
+
     setEditUserLoading(true);
     try {
       const fullName = `${editUserForm.firstName} ${editUserForm.lastName}`;
-      
-      // User profiles tablosunu güncelle
-      const { error: profileError } = await supabase
-        .from('user_profiles')
-        .update({
+
+      // Admin username'i al (session'dan)
+      let adminUsername = null;
+      const sessionData = await AsyncStorage.getItem('institutionAdminSession');
+      if (sessionData) {
+        const session = JSON.parse(sessionData);
+        adminUsername = session.adminUsername || null;
+      }
+
+      // Edge Function kullanarak güncelleme yap (RLS politikası nedeniyle)
+      const result = await updateInstitutionAdminUser(
+        institution?.id || institution?.institution_id,
+        userId,
+        isTeacher ? 'teacher' : 'student',
+        {
           name: fullName,
-          email: editUserForm.email
-        })
-        .eq('user_id', selectedUser.user_id);
+          email: editUserForm.email,
+          branch: isTeacher ? editUserForm.branch : null,
+          grade: isTeacher ? null : editUserForm.grade,
+          phone: editUserForm.phone
+        },
+        adminUsername
+      );
 
-      if (profileError) {
-        console.error('User profile güncelleme hatası:', profileError);
-        throw profileError;
+      if (result.error) {
+        const errorMessage = result.error?.message || result.error || 'Bilinmeyen hata';
+        const errorDetails = result.error?.details || '';
+        Alert.alert('Hata', `${errorMessage}${errorDetails ? '\n\n' + errorDetails : ''}`);
+        setEditUserLoading(false);
+        return;
       }
 
-      // Öğretmen mi öğrenci mi kontrol et
-      if (selectedUser.branch) {
-        // Öğretmen
-        const { error: teacherError } = await supabase
-          .from('teachers')
-          .update({
-            name: fullName,
-            email: editUserForm.email,
-            branch: editUserForm.branch,
-            phone: editUserForm.phone
-          })
-          .eq('user_id', selectedUser.user_id);
-
-        if (teacherError) {
-          console.error('Öğretmen güncelleme hatası:', teacherError);
-          throw teacherError;
-        }
-      } else {
-        // Öğrenci
-        const { error: studentError } = await supabase
-          .from('students')
-          .update({
-            name: fullName,
-            email: editUserForm.email,
-            grade: editUserForm.grade,
-            phone: editUserForm.phone
-          })
-          .eq('user_id', selectedUser.user_id);
-
-        if (studentError) {
-          console.error('Öğrenci güncelleme hatası:', studentError);
-          throw studentError;
-        }
-      }
-
-      Alert.alert('Başarılı!', 'Kullanıcı bilgileri güncellendi.');
+      // Modal'ı kapat ve selectedUser'ı temizle
       setShowEditUser(false);
       setSelectedUser(null);
       
+      // Supabase cache'inin temizlenmesi için kısa bir bekleme
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
       // Listeleri yenile
-      if (selectedUser.branch) {
+      if (isTeacher) {
         await loadTeachers();
         await loadStatsData(institution?.id || institution?.institution_id);
       } else {
         await loadStudents();
         await loadStatsData(institution?.id || institution?.institution_id);
       }
+
+      Alert.alert('Başarılı!', 'Kullanıcı bilgileri güncellendi.');
     } catch (error) {
       console.error('Kullanıcı güncelleme hatası:', error);
       Alert.alert('Hata', `Kullanıcı bilgileri güncellenirken bir hata oluştu: ${error.message}`);
@@ -1755,27 +1152,22 @@ const InstitutionAdminScreen = ({ route }) => {
       return;
     }
 
-    // Kullanıcının email'ini al
-    let userEmail = user.email;
-    if (!userEmail) {
-      try {
-        const { data: userProfile } = await supabaseAdmin
-          .from('user_profiles')
-          .select('email')
-          .eq('user_id', userId)
-          .single();
-        
-        userEmail = userProfile?.email || null;
-        
-        if (!userEmail) {
-          const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(userId);
-          userEmail = authUser?.user?.email || 'Bilinmiyor';
-        }
-      } catch (error) {
-        console.error('Email alınamadı:', error);
-        userEmail = 'Bilinmiyor';
+    const institutionId = institution?.id || institution?.institution_id;
+    if (!institutionId) {
+      const sessionData = await AsyncStorage.getItem('institutionAdminSession');
+      if (sessionData) {
+        const session = JSON.parse(sessionData);
+        institutionId = session.institutionId;
       }
     }
+
+    if (!institutionId) {
+      Alert.alert('Hata', 'Kurum bilgisi bulunamadı.');
+      return;
+    }
+
+    // Kullanıcının email'ini al (önceden gösterim için)
+    let userEmail = user.email || 'Bilinmiyor';
 
     Alert.alert(
       'Şifre Sıfırla',
@@ -1787,30 +1179,40 @@ const InstitutionAdminScreen = ({ route }) => {
           style: 'destructive',
           onPress: async () => {
             try {
-              // Admin client ile direkt şifre sıfırlama
-              const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(userId, {
-                password: 'user123'
-              });
-
-              if (updateError) {
-                // Fallback: RPC fonksiyonu ile şifre sıfırlama
-                const { data, error: rpcError } = await supabaseAdmin.rpc('reset_user_password_admin', {
-                  target_user_id: userId,
-                  new_password: 'user123'
-                });
-
-                if (rpcError) {
-                  throw rpcError;
-                }
+              // Admin username'i al (session'dan)
+              let adminUsername = null;
+              const sessionData = await AsyncStorage.getItem('institutionAdminSession');
+              if (sessionData) {
+                const session = JSON.parse(sessionData);
+                adminUsername = session.adminUsername || null;
               }
 
+              // Edge Function kullan
+              const result = await resetInstitutionAdminUserPassword(
+                institutionId,
+                userId,
+                adminUsername
+              );
+
+              if (result.error) {
+                const errorMessage = result.error?.message || result.error || 'Bilinmeyen hata';
+                const errorDetails = result.error?.details || '';
+                Alert.alert('Hata', `${errorMessage}${errorDetails ? '\n\n' + errorDetails : ''}`);
+                return;
+              }
+
+              // Başarılı
+              const resultEmail = result.data?.email || userEmail;
+              const resultPassword = result.data?.new_password || 'user123';
               Alert.alert(
                 'Başarılı!', 
-                `${user.name} kullanıcısının şifresi sıfırlandı.\n\nE-posta: ${userEmail}\nYeni şifre: user123\n\nBu şifreyi kullanıcıya iletin.`
+                `${user.name} kullanıcısının şifresi sıfırlandı.\n\nE-posta: ${resultEmail}\nYeni şifre: ${resultPassword}\n\nBu şifreyi kullanıcıya iletin.`
               );
             } catch (error) {
-              console.error('Şifre sıfırlama hatası:', error);
-              Alert.alert('Hata', 'Şifre sıfırlanırken bir hata oluştu. Lütfen geliştirici ile iletişime geçin.');
+              // Error objesini güvenli şekilde log'la
+              const errorMessage = error?.message || error?.toString() || 'Bilinmeyen hata';
+              console.error('[ERROR] Şifre sıfırlama hatası:', errorMessage);
+              Alert.alert('Hata', `Şifre sıfırlanırken bir hata oluştu: ${errorMessage}`);
             }
           }
         }
@@ -1831,41 +1233,54 @@ const InstitutionAdminScreen = ({ route }) => {
           onPress: async () => {
             try {
               // SOFT-DELETE: Kurumdan ayır ve erişimi engelle
-              const institutionId = institution?.id || institution?.institution_id;
+              let institutionId = institution?.id || institution?.institution_id;
+              if (!institutionId) {
+                const sessionData = await AsyncStorage.getItem('institutionAdminSession');
+                if (sessionData) {
+                  const session = JSON.parse(sessionData);
+                  institutionId = session.institutionId;
+                }
+              }
+
+              if (!institutionId) {
+                Alert.alert('Hata', 'Kurum bilgisi bulunamadı.');
+                return;
+              }
 
               const targetUserId = user?.user_id || user?.id;
-              if (user.branch) {
-                // Öğretmen: teacher satırını çöz ve ilişikleri kes
-                const { data: teacherRow } = await supabaseAdmin
-                  .from('teachers')
-                  .select('id')
-                  .eq('user_id', targetUserId)
-                  .single();
-
-                if (teacherRow?.id) {
-                  await supabaseAdmin.from('student_teachers').delete().eq('teacher_id', teacherRow.id);
-                }
-                await supabaseAdmin.from('teachers').update({ institution_id: null }).eq('user_id', targetUserId);
-              } else {
-                // Öğrenci: ilişikleri kes, kurum ID'yi boşalt
-                await supabaseAdmin.from('student_teachers').delete().eq('student_id', targetUserId);
-                await supabaseAdmin.from('students').update({ institution_id: null }).eq('user_id', targetUserId);
+              if (!targetUserId) {
+                Alert.alert('Hata', 'Kullanıcı ID bulunamadı.');
+                return;
               }
 
-              // Kurum üyeliğini kaldır (sil) veya pasifleştir
-              if (institutionId) {
-                await supabaseAdmin
-                  .from('institution_memberships')
-                  .delete()
-                  .match({ user_id: targetUserId, institution_id: institutionId });
-              } else {
-                await supabaseAdmin
-                  .from('institution_memberships')
-                  .delete()
-                  .eq('user_id', targetUserId);
+              // Kullanıcı tipini belirle
+              const userType = user.branch ? 'teacher' : 'student';
+
+              // Admin username'i al (session'dan)
+              let adminUsername = null;
+              const sessionData = await AsyncStorage.getItem('institutionAdminSession');
+              if (sessionData) {
+                const session = JSON.parse(sessionData);
+                adminUsername = session.adminUsername || null;
               }
 
-              Alert.alert('Başarılı!', `${user.name} kurumdan kaldırıldı.`);
+              // Edge Function kullan
+              const result = await deleteInstitutionAdminUser(
+                institutionId,
+                targetUserId,
+                userType,
+                adminUsername
+              );
+
+              if (result.error) {
+                const errorMessage = result.error?.message || result.error || 'Bilinmeyen hata';
+                const errorDetails = result.error?.details || '';
+                Alert.alert('Hata', `${errorMessage}${errorDetails ? '\n\n' + errorDetails : ''}`);
+                return;
+              }
+
+              // Başarılı
+              Alert.alert('Başarılı!', result.data?.message || `${user.name} kurumdan kaldırıldı.`);
               
               // Listeleri yenile
               if (user.branch) {
@@ -1875,10 +1290,12 @@ const InstitutionAdminScreen = ({ route }) => {
               }
               
               // İstatistikleri güncelle
-              await loadStatsData(institution?.id || institution?.institution_id);
+              await loadStatsData(institutionId);
             } catch (error) {
-              console.error('Kullanıcı silme hatası:', error);
-              Alert.alert('Hata', 'Kullanıcı silinirken bir hata oluştu.');
+              // Error objesini güvenli şekilde log'la
+              const errorMessage = error?.message || error?.toString() || 'Bilinmeyen hata';
+              console.error('[ERROR] Kullanıcı silme hatası:', errorMessage);
+              Alert.alert('Hata', `Kullanıcı silinirken bir hata oluştu: ${errorMessage}`);
             }
           }
         }
@@ -1931,7 +1348,7 @@ const InstitutionAdminScreen = ({ route }) => {
                             // teacher_id yoksa user_id'den bul
                             if (!teacherId && item.user_id) {
                               console.log('teacher_id bulunamadı, user_id ile aranıyor:', item.user_id);
-                              const { data, error } = await supabaseAdmin
+                              const { data, error } = await supabase
                                 .from('teachers')
                                 .select('id')
                                 .eq('user_id', item.user_id)
@@ -2051,6 +1468,101 @@ const InstitutionAdminScreen = ({ route }) => {
       </View>
     </Card>
   );
+
+  // Şifre değiştirme fonksiyonu
+  const handleChangePassword = async () => {
+    // Form validasyonu
+    if (!changePasswordForm.currentPassword || !changePasswordForm.newPassword || !changePasswordForm.confirmPassword) {
+      Alert.alert('Hata', 'Tüm alanlar doldurulmalıdır!');
+      return;
+    }
+
+    if (changePasswordForm.newPassword.length < 6) {
+      Alert.alert('Hata', 'Yeni şifre en az 6 karakter olmalıdır!');
+      return;
+    }
+
+    if (changePasswordForm.newPassword !== changePasswordForm.confirmPassword) {
+      Alert.alert('Hata', 'Yeni şifre ve şifre onayı eşleşmiyor!');
+      return;
+    }
+
+    let institutionId = institution?.id || institution?.institution_id;
+    if (!institutionId) {
+      const sessionData = await AsyncStorage.getItem('institutionAdminSession');
+      if (sessionData) {
+        const session = JSON.parse(sessionData);
+        institutionId = session.institutionId;
+      }
+    }
+
+    if (!institutionId) {
+      Alert.alert('Hata', 'Kurum bilgisi bulunamadı.');
+      return;
+    }
+
+    // Admin username'i al (session'dan)
+    let adminUsername = null;
+    const sessionData = await AsyncStorage.getItem('institutionAdminSession');
+    if (sessionData) {
+      const session = JSON.parse(sessionData);
+      adminUsername = session.adminUsername || null;
+    }
+
+    if (!adminUsername) {
+      Alert.alert('Hata', 'Admin kullanıcı adı bulunamadı.');
+      return;
+    }
+
+    setChangingPassword(true);
+    try {
+      const result = await changeInstitutionAdminPassword(
+        institutionId,
+        adminUsername,
+        changePasswordForm.currentPassword,
+        changePasswordForm.newPassword,
+        changePasswordForm.confirmPassword
+      );
+
+      if (result.error) {
+        let errorMessage = result.error?.message || result.error || 'Bilinmeyen hata';
+        const errorDetails = result.error?.details || '';
+        
+        // Eğer hata mesajı "Edge Function hatası (response body yok)" ise, 
+        // muhtemelen 401 hatası (yanlış şifre) - daha anlamlı mesaj göster
+        if (errorMessage.includes('response body yok') || errorMessage.includes('non-2xx')) {
+          // Status code'a göre mesaj belirle
+          if (errorDetails.includes('401') || errorMessage.includes('401')) {
+            errorMessage = 'Mevcut şifre yanlış. Lütfen doğru şifreyi girin.';
+          } else if (errorDetails.includes('403')) {
+            errorMessage = 'Erişim yetkiniz yok.';
+          } else if (errorDetails.includes('404')) {
+            errorMessage = 'Admin bilgileri bulunamadı.';
+          } else {
+            errorMessage = 'Şifre değiştirme işlemi başarısız oldu. Lütfen tekrar deneyin.';
+          }
+        }
+        
+        Alert.alert('Hata', `${errorMessage}${errorDetails && !errorDetails.includes('401') && !errorDetails.includes('403') && !errorDetails.includes('404') ? '\n\n' + errorDetails : ''}`);
+        return;
+      }
+
+      // Başarılı
+      Alert.alert('Başarılı!', result.data?.message || 'Şifre başarıyla değiştirildi.');
+      setShowChangePassword(false);
+      setChangePasswordForm({
+        currentPassword: '',
+        newPassword: '',
+        confirmPassword: ''
+      });
+    } catch (error) {
+      const errorMessage = error?.message || error?.toString() || 'Bilinmeyen hata';
+      console.error('[ERROR] Şifre değiştirme hatası:', errorMessage);
+      Alert.alert('Hata', `Şifre değiştirilirken bir hata oluştu: ${errorMessage}`);
+    } finally {
+      setChangingPassword(false);
+    }
+  };
 
   const handleLogout = useCallback(async (skipConfirm = false) => {
     // Eğer zaten logout işlemi yapılıyorsa, tekrar çağrılmasını engelle
@@ -2198,8 +1710,10 @@ const InstitutionAdminScreen = ({ route }) => {
                     <View style={styles.guidanceTeacherHeader}>
                       <Ionicons name="school" size={24} color={colors.primary} />
                       <View style={styles.guidanceTeacherInfo}>
-                        <Text style={styles.guidanceTeacherName}>{guidanceTeacher.name}</Text>
-                        {guidanceTeacher.email && (
+                        <Text style={styles.guidanceTeacherName}>
+                          {guidanceTeacher.name || guidanceTeacher.email || 'Bilinmeyen Öğretmen'}
+                        </Text>
+                        {guidanceTeacher.email && guidanceTeacher.email !== guidanceTeacher.name && (
                           <Text style={styles.guidanceTeacherEmail}>{guidanceTeacher.email}</Text>
                         )}
                       </View>
@@ -2228,7 +1742,18 @@ const InstitutionAdminScreen = ({ route }) => {
           {/* Kurum Bilgileri */}
           {institution && (
             <View style={styles.institutionContainer}>
-              <Text style={styles.sectionTitle}>🏢 Kurum Bilgileri</Text>
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionTitle}>🏢 Kurum Bilgileri</Text>
+                <TouchableOpacity
+                  style={styles.changePasswordButton}
+                  onPress={() => setShowChangePassword(true)}
+                >
+                  <Ionicons name="lock-closed-outline" size={18} color={colors.primary} />
+                  <Text style={[styles.changePasswordButtonText, { color: colors.primary }]}>
+                    Şifre Değiştir
+                  </Text>
+                </TouchableOpacity>
+              </View>
               <Card style={styles.institutionCard}>
                 <View style={styles.institutionHeader}>
                   <View style={styles.institutionInfo}>
@@ -2692,6 +2217,79 @@ const InstitutionAdminScreen = ({ route }) => {
           </View>
         </Modal>
 
+        {/* Şifre Değiştirme Modal */}
+        <Modal
+          visible={showChangePassword}
+          animationType="slide"
+          transparent={true}
+          onRequestClose={() => setShowChangePassword(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>🔒 Şifre Değiştir</Text>
+                <TouchableOpacity
+                  onPress={() => {
+                    setShowChangePassword(false);
+                    setChangePasswordForm({
+                      currentPassword: '',
+                      newPassword: '',
+                      confirmPassword: ''
+                    });
+                  }}
+                  style={styles.closeButton}
+                >
+                  <Ionicons name="close" size={24} color={colors.textPrimary} />
+                </TouchableOpacity>
+              </View>
+              <ScrollView style={styles.modalScrollView} showsVerticalScrollIndicator={false}>
+                <Input
+                  label="Mevcut Şifre"
+                  value={changePasswordForm.currentPassword}
+                  onChangeText={(text) => setChangePasswordForm({...changePasswordForm, currentPassword: text})}
+                  placeholder="Mevcut şifrenizi girin"
+                  secureTextEntry
+                />
+                <Input
+                  label="Yeni Şifre"
+                  value={changePasswordForm.newPassword}
+                  onChangeText={(text) => setChangePasswordForm({...changePasswordForm, newPassword: text})}
+                  placeholder="Yeni şifrenizi girin (min 6 karakter)"
+                  secureTextEntry
+                />
+                <Input
+                  label="Yeni Şifre (Tekrar)"
+                  value={changePasswordForm.confirmPassword}
+                  onChangeText={(text) => setChangePasswordForm({...changePasswordForm, confirmPassword: text})}
+                  placeholder="Yeni şifrenizi tekrar girin"
+                  secureTextEntry
+                />
+              </ScrollView>
+              <View style={[styles.modalButtons, { padding: 20, paddingTop: 0 }]}>
+                <Button
+                  title="İptal"
+                  onPress={() => {
+                    setShowChangePassword(false);
+                    setChangePasswordForm({
+                      currentPassword: '',
+                      newPassword: '',
+                      confirmPassword: ''
+                    });
+                  }}
+                  variant="ghost"
+                  style={styles.modalButton}
+                />
+                <Button
+                  title="Değiştir"
+                  onPress={handleChangePassword}
+                  loading={changingPassword}
+                  style={[styles.modalButton, { backgroundColor: colors.primary }]}
+                />
+              </View>
+            </View>
+          </View>
+        </Modal>
+
       </View>
     </Container>
   );
@@ -2744,6 +2342,24 @@ const createStyles = (colors) => StyleSheet.create({
     fontWeight: '600',
     color: colors.text,
     marginBottom: 16,
+  },
+  sectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  changePasswordButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    gap: 4,
+  },
+  changePasswordButtonText: {
+    fontSize: 14,
+    fontWeight: '500',
   },
   statsGrid: {
     flexDirection: 'row',

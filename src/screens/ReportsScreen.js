@@ -83,6 +83,15 @@ export default function ReportsScreen({ route, navigation }) {
 
   const checkAuthStatus = async () => {
     try {
+      // Demo mod kontrolü - route params'tan isDemo'yu al
+      const routeIsDemo = route?.params?.isDemo || false;
+      
+      // Eğer demo moddaysa, auth kontrolü yapma
+      if (routeIsDemo) {
+        setIsDemo(true);
+        return;
+      }
+
       const { data: { user } } = await supabase.auth.getUser();
       setIsDemo(!user); // Kullanıcı yoksa demo mod
     } catch (error) {

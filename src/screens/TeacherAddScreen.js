@@ -7,7 +7,8 @@ import { DARK_COLORS, COLORS } from '../constants/theme';
 import { SIZES, SHADOWS } from '../constants/theme';
 import Container from '../components/Container';
 import Card from '../components/Card';
-import { supabase, supabaseAdmin } from '../lib/supabase';
+import { supabase } from '../lib/supabase';
+import { getGuidanceTeacherStudentDetail, getGuidanceTeacherStudents } from '../lib/adminApi';
 
 const TeacherAddScreen = ({ navigation }) => {
   const { isDark } = useTheme();
@@ -90,17 +91,55 @@ const TeacherAddScreen = ({ navigation }) => {
         isGuidanceTeacherLocal = true;
         setIsGuidanceTeacher(true);
         
-        // Rehber öğretmen - Kurumundaki tüm öğrencileri göster
-        const { data: institutionMemberships, error: membershipError } = await supabaseAdmin
-          .from('institution_memberships')
-          .select('user_id')
-          .eq('institution_id', institutionData.id)
-          .eq('role', 'student')
-          .eq('is_active', true);
-
-        if (!membershipError && institutionMemberships?.length > 0) {
-          studentIds = institutionMemberships.map(m => m.user_id).filter(Boolean);
+        // Rehber öğretmen - Edge Function ile kurumundaki tüm öğrencileri göster
+        const result = await getGuidanceTeacherStudents(institutionData.id);
+        
+        if (result.error) {
+          console.error('Rehber öğretmen öğrencileri yüklenirken hata:', result.error);
+          if (showLoading) {
+            setLoading(false);
+          }
+          return;
         }
+
+        // Edge Function'dan gelen öğrenci listesini formatla
+        const studentsData = result.data?.data || result.data || [];
+        const userIds = studentsData.map(s => s.user_id).filter(Boolean);
+        
+        // Avatar bilgilerini al
+        const avatarMap = {};
+        if (userIds.length > 0) {
+          const { data: profiles } = await supabase
+            .from('user_profiles')
+            .select('user_id, selected_avatar')
+            .in('user_id', userIds);
+          
+          profiles?.forEach(profile => {
+            avatarMap[profile.user_id] = profile.selected_avatar;
+          });
+        }
+        
+        setStudentAvatars(avatarMap);
+        
+        const formattedStudents = studentsData.map(student => ({
+          id: student.user_id,
+          name: student.name || `Öğrenci ${student.id?.substring(0, 8) || ''}`,
+          email: student.email || '',
+          class: student.grade || 'Belirtilmemiş'
+        }));
+
+        // Alfabetik sıralama (isme göre)
+        formattedStudents.sort((a, b) => {
+          const nameA = (a.name || '').toLowerCase();
+          const nameB = (b.name || '').toLowerCase();
+          return nameA.localeCompare(nameB, 'tr');
+        });
+
+        setStudents(formattedStudents);
+        if (showLoading) {
+          setLoading(false);
+        }
+        return; // Rehber öğretmen için işlem tamamlandı
       } else {
         setIsGuidanceTeacher(false);
         // Normal öğretmen - Bağlı öğrencileri al
@@ -131,10 +170,8 @@ const TeacherAddScreen = ({ navigation }) => {
         return;
       }
       
-      // Öğrenci profil verilerini al
-      const queryClient = isGuidanceTeacherLocal ? supabaseAdmin : supabase;
-      
-      const { data: studentProfiles, error: profileError } = await queryClient
+      // Normal öğretmen için öğrenci profil verilerini al
+      const { data: studentProfiles, error: profileError } = await supabase
         .from('user_profiles')
         .select('user_id, selected_avatar')
         .in('user_id', studentIds);
@@ -160,14 +197,14 @@ const TeacherAddScreen = ({ navigation }) => {
       
       for (const studentId of studentIds) {
         // user_profiles tablosundan gerçek bilgileri çek
-        const { data: profile, error: profileError } = await queryClient
+        const { data: profile, error: profileError } = await supabase
           .from('user_profiles')
           .select('user_id, name, email')
           .eq('user_id', studentId)
           .single();
         
         // students tablosundan sınıf bilgisini çek
-        const { data: studentData, error: studentError } = await queryClient
+        const { data: studentData, error: studentError } = await supabase
           .from('students')
           .select('grade')
           .eq('email', profile?.email || '')
@@ -218,31 +255,72 @@ const TeacherAddScreen = ({ navigation }) => {
     setShowStudentDetailModal(true);
 
     try {
-      // Rehber öğretmen kontrolü için queryClient kullan
-      const queryClient = isGuidanceTeacher ? supabaseAdmin : supabase;
+      let studentData = null;
       
-      // Students tablosundan detaylı bilgileri çek
-      const { data: studentData, error } = await queryClient
-        .from('students')
-        .select('*')
-        .eq('email', student.email)
-        .maybeSingle();
+      // Rehber öğretmen kontrolü
+      if (isGuidanceTeacher) {
+        // Öğretmen ID'sini al
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) {
+          throw new Error('Kullanıcı oturumu bulunamadı');
+        }
 
-      if (error || !studentData) {
-        console.error('Öğrenci detayları yüklenirken hata:', error);
-        // Hata durumunda da modal'ı göster ama sadece temel bilgilerle
-        setStudentDetail({
-          name: student.name,
-          email: student.email,
-          school: 'Belirtilmemiş',
-          grade: student.class || 'Belirtilmemiş',
-          phone: 'Belirtilmemiş',
-          parent_name: 'Belirtilmemiş',
-          parent_phone: 'Belirtilmemiş',
-          address: null,
-          notes: null
-        });
-        return;
+        const { data: teacherData } = await supabase
+          .from('teachers')
+          .select('id')
+          .eq('user_id', user.id)
+          .single();
+
+        if (!teacherData) {
+          throw new Error('Öğretmen bulunamadı');
+        }
+
+        // Kurum ID'sini al
+        const { data: institutionData } = await supabase
+          .from('institutions')
+          .select('id')
+          .eq('guidance_teacher_id', teacherData.id)
+          .eq('is_active', true)
+          .maybeSingle();
+
+        if (institutionData) {
+          // Edge Function kullan
+          const result = await getGuidanceTeacherStudentDetail(student.email || student.id, institutionData.id);
+          
+          if (result.error) {
+            throw new Error(result.error.message || 'Öğrenci detayları yüklenemedi');
+          }
+          
+          studentData = result.data?.data || result.data;
+        }
+      }
+
+      // Normal öğretmen veya Edge Function başarısız olduysa normal supabase kullan
+      if (!studentData) {
+        const { data: studentDataFromSupabase, error } = await supabase
+          .from('students')
+          .select('*')
+          .eq('email', student.email)
+          .maybeSingle();
+
+        if (error || !studentDataFromSupabase) {
+          console.error('Öğrenci detayları yüklenirken hata:', error);
+          // Hata durumunda da modal'ı göster ama sadece temel bilgilerle
+          setStudentDetail({
+            name: student.name,
+            email: student.email,
+            school: 'Belirtilmemiş',
+            grade: student.class || 'Belirtilmemiş',
+            phone: 'Belirtilmemiş',
+            parent_name: 'Belirtilmemiş',
+            parent_phone: 'Belirtilmemiş',
+            address: null,
+            notes: null
+          });
+          return;
+        }
+        
+        studentData = studentDataFromSupabase;
       }
 
       // Eksik alanları varsayılan değerlerle doldur

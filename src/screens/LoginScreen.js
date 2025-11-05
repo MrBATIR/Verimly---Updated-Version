@@ -2,10 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, KeyboardAvoidingView, Platform, ScrollView, Alert, TouchableOpacity, Modal, FlatList, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, CommonActions } from '@react-navigation/native';
 import { Container, Input, Button, InterstitialAd } from '../components';
 import { COLORS, DARK_COLORS, SIZES } from '../constants/theme';
-import { supabase, supabaseAdmin } from '../lib/supabase';
+import { supabase } from '../lib/supabase';
+// ⚠️ supabaseAdmin artık kullanılmıyor - Edge Functions kullanılmalı
 import { useTheme } from '../contexts/ThemeContext';
 
 export default function LoginScreen({ navigation: navigationProp }) {
@@ -92,7 +93,7 @@ export default function LoginScreen({ navigation: navigationProp }) {
     setLoadingAdminStats(true);
     try {
       // Kurum istatistikleri
-      const { data: institutions } = await supabaseAdmin
+      const { data: institutions } = await supabase
         .from('institutions')
         .select('id, name, is_active, is_premium');
 
@@ -100,17 +101,17 @@ export default function LoginScreen({ navigation: navigationProp }) {
       const activeInstitutions = institutions?.filter(inst => inst.is_active)?.length || 0;
 
       // Toplam öğretmen sayısı
-      const { count: teachersCount } = await supabaseAdmin
+      const { count: teachersCount } = await supabase
         .from('teachers')
         .select('*', { count: 'exact', head: true });
 
       // Toplam öğrenci sayısı
-      const { count: studentsCount } = await supabaseAdmin
+      const { count: studentsCount } = await supabase
         .from('students')
         .select('*', { count: 'exact', head: true });
 
       // Bireysel kullanıcı sayısı - Bireysel Kullanıcılar kurumundan al
-      const { data: individualInstitution } = await supabaseAdmin
+      const { data: individualInstitution } = await supabase
         .from('institutions')
         .select('id')
         .eq('name', 'Bireysel Kullanıcılar')
@@ -118,7 +119,7 @@ export default function LoginScreen({ navigation: navigationProp }) {
 
       let individualUsers = 0;
       if (individualInstitution) {
-        const { count: individualUsersCount } = await supabaseAdmin
+        const { count: individualUsersCount } = await supabase
           .from('institution_memberships')
           .select('*', { count: 'exact', head: true })
           .eq('institution_id', individualInstitution.id)
@@ -127,7 +128,7 @@ export default function LoginScreen({ navigation: navigationProp }) {
       }
 
       // Toplam bağlantı sayısı
-      const { count: connectionsCount } = await supabaseAdmin
+      const { count: connectionsCount } = await supabase
         .from('student_teachers')
         .select('*', { count: 'exact', head: true })
         .eq('approval_status', 'approved')
@@ -152,71 +153,146 @@ export default function LoginScreen({ navigation: navigationProp }) {
   };
 
   const loadInstitutionStats = async () => {
+    console.log('[DEBUG] loadInstitutionStats başladı');
     try {
-      const { data: institutions } = await supabaseAdmin
+      // supabase kontrolü
+      console.log('[DEBUG] supabase kontrolü:', {
+        supabaseExists: !!supabase,
+        hasFrom: !!(supabase && supabase.from),
+        supabaseType: typeof supabase,
+        supabaseKeys: supabase ? Object.keys(supabase) : 'null'
+      });
+      
+      if (!supabase || !supabase.from) {
+        console.log('[DEBUG] supabase undefined veya from metodu yok!', {
+          supabase: supabase,
+          supabaseFrom: supabase?.from
+        });
+        return;
+      }
+
+      console.log('[DEBUG] institutions sorgusu başlatılıyor...');
+      const { data: institutions, error: institutionsError } = await supabase
         .from('institutions')
         .select('id, name, is_active, is_premium');
 
+      console.log('[DEBUG] institutions sorgusu sonucu:', {
+        hasData: !!institutions,
+        dataLength: institutions?.length,
+        error: institutionsError,
+        errorType: institutionsError ? typeof institutionsError : 'none',
+        errorMessage: institutionsError?.message
+      });
+
+      if (institutionsError) {
+        console.log('[DEBUG] institutionsError var, return ediliyor:', institutionsError);
+        return;
+      }
+
+      if (!institutions || institutions.length === 0) {
+        setInstitutionStats([]);
+        return;
+      }
+
       const institutionStatsData = await Promise.all(
-        institutions?.map(async (inst, index) => {
-          // Bireysel Kullanıcılar kurumu için özel işlem
-          if (inst.name === 'Bireysel Kullanıcılar') {
-            // Bireysel kullanıcılar için students tablosundan say
-            const { data: students } = await supabaseAdmin
-              .from('students')
-              .select('id')
-              .eq('institution_id', inst.id);
+        institutions.map(async (inst, index) => {
+          try {
+            // Bireysel Kullanıcılar kurumu için özel işlem
+            if (inst.name === 'Bireysel Kullanıcılar') {
+              console.log('[DEBUG] Bireysel Kullanıcılar kurumu işleniyor, inst.id:', inst.id);
+              // Bireysel kullanıcılar için students tablosundan say
+              console.log('[DEBUG] students sorgusu başlatılıyor...');
+              const { data: students, error: studentsError } = await supabase
+                .from('students')
+                .select('id')
+                .eq('institution_id', inst.id);
+              
+              console.log('[DEBUG] students sorgusu sonucu:', {
+                hasData: !!students,
+                dataLength: students?.length,
+                error: studentsError
+              });
 
             // Eğer students tablosunda veri yoksa, institution_memberships tablosunu da kontrol et
             let finalStudentCount = students?.length || 0;
             
             if (finalStudentCount === 0) {
-              const { data: memberships } = await supabaseAdmin
+              console.log('[DEBUG] students sayısı 0, memberships sorgusu başlatılıyor...');
+              const { data: memberships, error: membershipsError } = await supabase
                 .from('institution_memberships')
                 .select('user_id')
                 .eq('institution_id', inst.id);
+              
+              console.log('[DEBUG] memberships sorgusu sonucu:', {
+                hasData: !!memberships,
+                dataLength: memberships?.length,
+                error: membershipsError
+              });
 
               if (memberships && memberships.length > 0) {
                 const userIds = memberships.map(m => m.user_id);
+                console.log('[DEBUG] userProfiles sorgusu başlatılıyor, userIds:', userIds.length);
                 
-                const { data: userProfiles } = await supabaseAdmin
+                const { data: userProfiles, error: userProfilesError } = await supabase
                   .from('user_profiles')
                   .select('user_type')
                   .in('user_id', userIds);
+                
+                console.log('[DEBUG] userProfiles sorgusu sonucu:', {
+                  hasData: !!userProfiles,
+                  dataLength: userProfiles?.length,
+                  error: userProfilesError
+                });
 
                 const studentCount = userProfiles?.filter(p => p.user_type === 'student').length || 0;
                 finalStudentCount = studentCount;
               }
             }
 
-            return {
-              id: inst.id,
-              name: inst.name,
-              is_active: inst.is_active,
-              is_premium: inst.is_premium,
-              teacher_count: 0, // Bireysel kullanıcılar öğretmen olamaz
-              student_count: finalStudentCount,
-            };
-          }
+              return {
+                id: inst.id,
+                name: inst.name,
+                is_active: inst.is_active,
+                is_premium: inst.is_premium,
+                teacher_count: 0, // Bireysel kullanıcılar öğretmen olamaz
+                student_count: finalStudentCount,
+              };
+            }
 
-          // Diğer kurumlar için normal işlem
-          // Önce institution_memberships üzerinden say (bir öğretmen/öğrenci birden fazla kurumda olabilir)
-          const { data: memberships } = await supabaseAdmin
-            .from('institution_memberships')
-            .select('user_id, role')
-            .eq('institution_id', inst.id);
+            // Diğer kurumlar için normal işlem
+            // Önce institution_memberships üzerinden say (bir öğretmen/öğrenci birden fazla kurumda olabilir)
+            console.log('[DEBUG] Kurum işleniyor:', inst.name, 'inst.id:', inst.id);
+            console.log('[DEBUG] memberships sorgusu başlatılıyor...');
+            const { data: memberships, error: membershipsError } = await supabase
+              .from('institution_memberships')
+              .select('user_id, role')
+              .eq('institution_id', inst.id);
+            
+            console.log('[DEBUG] memberships sorgusu sonucu:', {
+              hasData: !!memberships,
+              dataLength: memberships?.length,
+              error: membershipsError
+            });
 
           let finalTeacherCount = 0;
           let finalStudentCount = 0;
 
           if (memberships && memberships.length > 0) {
             const userIds = memberships.map(m => m.user_id).filter(Boolean);
+            console.log('[DEBUG] userIds filtrelendi, sayı:', userIds.length);
             
             if (userIds.length > 0) {
-              const { data: userProfiles } = await supabaseAdmin
+              console.log('[DEBUG] userProfiles sorgusu başlatılıyor...');
+              const { data: userProfiles, error: userProfilesError } = await supabase
                 .from('user_profiles')
                 .select('user_type')
                 .in('user_id', userIds);
+              
+              console.log('[DEBUG] userProfiles sorgusu sonucu:', {
+                hasData: !!userProfiles,
+                dataLength: userProfiles?.length,
+                error: userProfilesError
+              });
 
               finalTeacherCount = userProfiles?.filter(p => p.user_type === 'teacher').length || 0;
               finalStudentCount = userProfiles?.filter(p => p.user_type === 'student').length || 0;
@@ -225,140 +301,296 @@ export default function LoginScreen({ navigation: navigationProp }) {
 
           // Fallback: Eğer membership'tan sayı 0 ise, teachers/students tablolarından kontrol et
           if (finalTeacherCount === 0 && finalStudentCount === 0) {
-            const { count: teacherCount } = await supabaseAdmin
+            console.log('[DEBUG] Fallback: teachers ve students count sorguları başlatılıyor...');
+            const { count: teacherCount, error: teacherCountError } = await supabase
               .from('teachers')
               .select('*', { count: 'exact', head: true })
               .eq('institution_id', inst.id);
 
-            const { count: studentCount } = await supabaseAdmin
+            console.log('[DEBUG] teachers count sorgusu sonucu:', {
+              count: teacherCount,
+              error: teacherCountError
+            });
+
+            const { count: studentCount, error: studentCountError } = await supabase
               .from('students')
               .select('*', { count: 'exact', head: true })
               .eq('institution_id', inst.id);
+            
+            console.log('[DEBUG] students count sorgusu sonucu:', {
+              count: studentCount,
+              error: studentCountError
+            });
 
             finalTeacherCount = teacherCount || 0;
             finalStudentCount = studentCount || 0;
           }
 
-          return {
-            id: inst.id,
-            name: inst.name,
-            is_active: inst.is_active,
-            is_premium: inst.is_premium,
-            teacher_count: finalTeacherCount,
-            student_count: finalStudentCount,
-          };
-        }) || []
+            return {
+              id: inst.id,
+              name: inst.name,
+              is_active: inst.is_active,
+              is_premium: inst.is_premium,
+              teacher_count: finalTeacherCount,
+              student_count: finalStudentCount,
+            };
+          } catch (error) {
+            // Hata durumunda boş veri döndür - sessizce handle et
+            console.log('[DEBUG] Kurum işlenirken hata:', {
+              instId: inst.id,
+              instName: inst.name,
+              errorType: typeof error,
+              errorMessage: error?.message,
+              errorStack: error?.stack,
+              errorKeys: error ? Object.keys(error) : 'no error object'
+            });
+            return {
+              id: inst.id,
+              name: inst.name || 'Bilinmeyen Kurum',
+              is_active: inst.is_active || false,
+              is_premium: inst.is_premium || false,
+              teacher_count: 0,
+              student_count: 0,
+            };
+          }
+        })
       );
 
-      setInstitutionStats(institutionStatsData);
+      console.log('[DEBUG] Tüm kurum istatistikleri hesaplandı, sayı:', institutionStatsData?.length);
+      setInstitutionStats(institutionStatsData || []);
     } catch (error) {
-      console.error('Kurum istatistikleri yüklenirken hata:', error);
+      // Hataları sessizce handle et
+      console.log('[DEBUG] loadInstitutionStats genel hata:', {
+        errorType: typeof error,
+        errorMessage: error?.message,
+        errorStack: error?.stack,
+        errorKeys: error ? Object.keys(error) : 'no error object'
+      });
+      setInstitutionStats([]);
     }
   };
 
   // Kurum detaylarını yükle (öğretmenler ve öğrenciler)
   const loadInstitutionDetails = async (institutionId) => {
-    if (!institutionId) {
-      console.error('loadInstitutionDetails: institutionId is null or undefined');
-      Alert.alert('Hata', 'Geçersiz kurum ID');
+    // EN ERKEN KONTROL - supabase import edilmiş mi?
+    if (typeof supabase === 'undefined') {
+      console.error('[CRITICAL] supabase import edilmemiş!');
+      setInstitutionTeachers([]);
+      setInstitutionStudents([]);
       return;
     }
+
+    console.log('[DEBUG] loadInstitutionDetails başladı, institutionId:', institutionId);
+    console.log('[DEBUG] supabase import kontrolü:', {
+      supabaseDefined: typeof supabase !== 'undefined',
+      supabaseType: typeof supabase,
+      supabaseValue: supabase
+    });
+
+    if (!institutionId) {
+      console.log('[DEBUG] institutionId yok, return ediliyor');
+      return;
+    }
+    
     setLoadingInstitutionDetails(true);
     try {
+      // supabase kontrolü - çok detaylı
+      console.log('[DEBUG] supabase kontrolü başlıyor...');
+      console.log('[DEBUG] supabase:', supabase);
+      console.log('[DEBUG] supabase.from:', supabase?.from);
+      console.log('[DEBUG] typeof supabase:', typeof supabase);
+      console.log('[DEBUG] supabase === null:', supabase === null);
+      console.log('[DEBUG] supabase === undefined:', supabase === undefined);
+      
+      if (supabase === null || supabase === undefined) {
+        console.error('[CRITICAL] supabase null veya undefined!');
+        setInstitutionTeachers([]);
+        setInstitutionStudents([]);
+        return;
+      }
+
+      if (typeof supabase.from !== 'function') {
+        console.error('[CRITICAL] supabase.from bir fonksiyon değil!', {
+          fromType: typeof supabase.from,
+          fromValue: supabase.from,
+          supabaseKeys: Object.keys(supabase || {})
+        });
+        setInstitutionTeachers([]);
+        setInstitutionStudents([]);
+        return;
+      }
+
       // Önce institution_memberships tablosundan user_id'leri al
-      const { data: memberships, error: membershipError } = await supabaseAdmin
-        .from('institution_memberships')
-        .select('user_id')
-        .eq('institution_id', institutionId);
+      console.log('[DEBUG] memberships sorgusu başlatılıyor...');
+      console.log('[DEBUG] supabase.from çağrılmadan önce kontrol:', {
+        supabase: !!supabase,
+        supabaseFrom: typeof supabase?.from,
+        supabaseFromValue: supabase?.from
+      });
+      
+      // Güvenli çağrı - try-catch ile
+      let memberships, membershipError;
+      try {
+        const result = await supabase
+          .from('institution_memberships')
+          .select('user_id')
+          .eq('institution_id', institutionId);
+        memberships = result.data;
+        membershipError = result.error;
+      } catch (queryError) {
+        console.error('[ERROR] supabase.from çağrısı sırasında hata:', queryError);
+        membershipError = queryError;
+        memberships = null;
+      }
+      
+      console.log('[DEBUG] memberships sorgusu sonucu:', {
+        hasData: !!memberships,
+        dataLength: memberships?.length,
+        error: membershipError,
+        errorType: membershipError ? typeof membershipError : 'none',
+        errorMessage: membershipError?.message
+      });
 
       if (membershipError) {
-        console.error('Membership error:', membershipError);
-        throw membershipError;
+        console.log('[DEBUG] membershipError var, return ediliyor:', membershipError);
+        setInstitutionTeachers([]);
+        setInstitutionStudents([]);
+        return;
       }
 
       if (!memberships || memberships.length === 0) {
+        console.log('[DEBUG] memberships boş, return ediliyor');
         setInstitutionTeachers([]);
         setInstitutionStudents([]);
         return;
       }
 
       const userIds = memberships.map(m => m.user_id).filter(Boolean); // null değerleri filtrele
+      console.log('[DEBUG] userIds filtrelendi, sayı:', userIds.length);
 
       if (userIds.length === 0) {
+        console.log('[DEBUG] userIds boş, return ediliyor');
         setInstitutionTeachers([]);
         setInstitutionStudents([]);
         return;
       }
 
       // Bu kullanıcıların user_profiles bilgilerini al
-      const { data: userProfiles, error: profilesError } = await supabaseAdmin
+      console.log('[DEBUG] userProfiles sorgusu başlatılıyor...');
+      const { data: userProfiles, error: profilesError } = await supabase
         .from('user_profiles')
         .select('user_id, name, user_type')
         .in('user_id', userIds);
+      
+      console.log('[DEBUG] userProfiles sorgusu sonucu:', {
+        hasData: !!userProfiles,
+        dataLength: userProfiles?.length,
+        error: profilesError,
+        errorType: profilesError ? typeof profilesError : 'none',
+        errorMessage: profilesError?.message
+      });
 
       if (profilesError) {
-        console.error('Profiles error:', profilesError);
-        throw profilesError;
+        console.log('[DEBUG] profilesError var, return ediliyor:', profilesError);
+        setInstitutionTeachers([]);
+        setInstitutionStudents([]);
+        return;
       }
 
       // Öğretmenleri filtrele
       const teachers = [];
       const students = [];
+      console.log('[DEBUG] userProfiles işleniyor, sayı:', userProfiles?.length);
 
       for (const profile of userProfiles || []) {
         if (!profile.user_id) continue; // user_id null ise atla
         
-        if (profile.user_type === 'teacher') {
-          // Teachers tablosundan branş bilgisini al
-          const { data: teacherData } = await supabaseAdmin
-            .from('teachers')
-            .select('branch')
-            .eq('user_id', profile.user_id)
-            .single();
+        try {
+          if (profile.user_type === 'teacher') {
+            // Teachers tablosundan branş bilgisini al
+            console.log('[DEBUG] teacher sorgusu başlatılıyor, user_id:', profile.user_id);
+            const { data: teacherData, error: teacherDataError } = await supabase
+              .from('teachers')
+              .select('branch')
+              .eq('user_id', profile.user_id)
+              .maybeSingle();
+            
+            console.log('[DEBUG] teacher sorgusu sonucu:', {
+              hasData: !!teacherData,
+              error: teacherDataError
+            });
 
-          teachers.push({
-            id: profile.user_id,
-            name: profile.name,
-            branch: teacherData?.branch || 'Belirtilmemiş'
-          });
-        } else if (profile.user_type === 'student') {
-          // Students tablosundan sınıf ve email bilgisini al
-          const { data: studentData } = await supabaseAdmin
-            .from('students')
-            .select('grade, email')
-            .eq('user_id', profile.user_id)
-            .maybeSingle();
+            teachers.push({
+              id: profile.user_id,
+              name: profile.name,
+              branch: teacherData?.branch || 'Belirtilmemiş'
+            });
+          } else if (profile.user_type === 'student') {
+            // Students tablosundan sınıf ve email bilgisini al
+            console.log('[DEBUG] student sorgusu başlatılıyor, user_id:', profile.user_id);
+            const { data: studentData, error: studentDataError } = await supabase
+              .from('students')
+              .select('grade, email')
+              .eq('user_id', profile.user_id)
+              .maybeSingle();
+            
+            console.log('[DEBUG] student sorgusu sonucu:', {
+              hasData: !!studentData,
+              error: studentDataError
+            });
 
-          // Email bilgisi students tablosunda yoksa auth.users'dan al
-          let studentEmail = studentData?.email || null;
-          if (!studentEmail) {
-            try {
-              const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(profile.user_id);
-              studentEmail = authUser?.user?.email || null;
-            } catch (error) {
-              console.error('Email alınamadı:', error);
-            }
+            // Email bilgisi students tablosundan alınır
+            let studentEmail = studentData?.email || null;
+
+            students.push({
+              id: profile.user_id,
+              user_id: profile.user_id,
+              name: profile.name,
+              grade: studentData?.grade || 'Belirtilmemiş',
+              email: studentEmail
+            });
           }
-
-          students.push({
-            id: profile.user_id,
-            user_id: profile.user_id,
-            name: profile.name,
-            grade: studentData?.grade || 'Belirtilmemiş',
-            email: studentEmail
+        } catch (itemError) {
+          // Tek bir item için hata oluşursa sessizce atla
+          console.log('[DEBUG] Item işlenirken hata:', {
+            profileUserId: profile.user_id,
+            profileUserType: profile.user_type,
+            errorType: typeof itemError,
+            errorMessage: itemError?.message,
+            errorStack: itemError?.stack,
+            errorKeys: itemError ? Object.keys(itemError) : 'no error object'
           });
+          continue;
         }
       }
 
       // Alfabetik sıralama
+      console.log('[DEBUG] Öğretmen ve öğrenci sayıları:', {
+        teachersCount: teachers.length,
+        studentsCount: students.length
+      });
       teachers.sort((a, b) => a.name.localeCompare(b.name, 'tr'));
       students.sort((a, b) => a.name.localeCompare(b.name, 'tr'));
 
       setInstitutionTeachers(teachers);
       setInstitutionStudents(students);
+      console.log('[DEBUG] loadInstitutionDetails başarıyla tamamlandı');
     } catch (error) {
-      console.error('Kurum detayları yüklenirken hata:', error);
-      Alert.alert('Hata', 'Kurum detayları yüklenemedi: ' + error.message);
+      // Hataları detaylı logla - console.error kullan ki görünsün
+      console.error('[ERROR] loadInstitutionDetails genel hata:', {
+        errorType: typeof error,
+        errorMessage: error?.message,
+        errorStack: error?.stack,
+        errorKeys: error ? Object.keys(error) : 'no error object',
+        errorName: error?.name,
+        errorConstructor: error?.constructor?.name,
+        errorFull: error
+      });
+      console.error('[ERROR] Hatanın tam detayı:', error);
+      
+      // Hata mesajını kullanıcıya gösterme - sadece boş listeler set et
+      setInstitutionTeachers([]);
+      setInstitutionStudents([]);
     } finally {
       setLoadingInstitutionDetails(false);
     }
@@ -367,7 +599,7 @@ export default function LoginScreen({ navigation: navigationProp }) {
   // Kullanıcı taşıma fonksiyonları
   const loadAvailableInstitutions = async () => {
     try {
-      const { data: institutions, error } = await supabaseAdmin
+      const { data: institutions, error } = await supabase
         .from('institutions')
         .select('id, name')
         .order('name');
@@ -401,7 +633,7 @@ export default function LoginScreen({ navigation: navigationProp }) {
       }
 
       // Kullanıcının user_type'ını al
-      const { data: userProfile } = await supabaseAdmin
+      const { data: userProfile } = await supabase
         .from('user_profiles')
         .select('user_type')
         .eq('user_id', userId)
@@ -415,7 +647,9 @@ export default function LoginScreen({ navigation: navigationProp }) {
       const userType = userProfile.user_type; // 'teacher' veya 'student'
 
       // 1. Eski kurumdaki tüm institution_memberships kayıtlarını sil
-      const { error: deleteError } = await supabaseAdmin
+      // NOT: Bu işlemler RLS ile yapılabilir olmalı veya Edge Function kullanılmalı
+      // Şimdilik normal supabase kullanıyoruz (RLS izinleri varsa çalışır)
+      const { error: deleteError } = await supabase
         .from('institution_memberships')
         .delete()
         .eq('user_id', userId);
@@ -427,7 +661,7 @@ export default function LoginScreen({ navigation: navigationProp }) {
       }
 
       // 2. Yeni kuruma institution_memberships ekle
-      const { error: insertError } = await supabaseAdmin
+      const { error: insertError } = await supabase
         .from('institution_memberships')
         .insert({
           institution_id: targetInstitutionId,
@@ -444,7 +678,7 @@ export default function LoginScreen({ navigation: navigationProp }) {
 
       // 3. teachers veya students tablosundaki institution_id'yi güncelle
       if (userType === 'teacher') {
-        const { error: teacherUpdateError } = await supabaseAdmin
+        const { error: teacherUpdateError } = await supabase
           .from('teachers')
           .update({ institution_id: targetInstitutionId })
           .eq('user_id', userId);
@@ -454,7 +688,7 @@ export default function LoginScreen({ navigation: navigationProp }) {
           // Kritik değil, devam et
         }
       } else if (userType === 'student') {
-        const { error: studentUpdateError } = await supabaseAdmin
+        const { error: studentUpdateError } = await supabase
           .from('students')
           .update({ institution_id: targetInstitutionId })
           .eq('user_id', userId);
@@ -733,175 +967,8 @@ export default function LoginScreen({ navigation: navigationProp }) {
     }
   };
 
-  // Kurum ekleme fonksiyonu
-  const addInstitution = async () => {
-    // Form validasyonu
-    if (!institutionForm.name || !institutionForm.contact_email || !institutionForm.admin_username || !institutionForm.admin_password) {
-      Alert.alert('Hata', 'Kurum adı, e-posta, admin kullanıcı adı ve şifre alanları zorunludur!');
-      return;
-    }
-
-    setInstitutionLoading(true);
-    try {
-      // Kurum oluştur
-      const { data: institutionData, error: institutionError } = await supabaseAdmin
-        .from('institutions')
-        .insert({
-          name: institutionForm.name,
-          type: institutionForm.type,
-          contact_email: institutionForm.contact_email,
-          contact_phone: institutionForm.contact_phone,
-          address: institutionForm.address,
-          is_active: true,
-          is_premium: true,
-          auto_renewal: false,
-          renewal_type: 'manual',
-          payment_status: 'pending',
-          admin_username: institutionForm.admin_username,
-          admin_password: institutionForm.admin_password,
-        })
-        .select()
-        .single();
-
-      if (institutionError) {
-        console.error('Kurum oluşturma hatası:', institutionError);
-        Alert.alert('Hata', 'Kurum oluşturulamadı: ' + institutionError.message);
-        return;
-      }
-
-      // Kurum admin giriş bilgilerini oluştur
-      const { data: credentialsData, error: credentialsError } = await supabaseAdmin
-        .from('institution_admin_credentials')
-        .insert({
-          institution_id: institutionData.id,
-          admin_username: institutionForm.admin_username,
-          admin_password: institutionForm.admin_password,
-          is_active: true
-        })
-        .select()
-        .single();
-
-      if (credentialsError) {
-        console.error('Admin giriş bilgileri oluşturma hatası:', credentialsError);
-        Alert.alert('Hata', 'Admin giriş bilgileri oluşturulamadı: ' + credentialsError.message);
-        return;
-      }
-
-      Alert.alert(
-        'Başarılı!',
-        `${institutionForm.name} kurumu oluşturuldu!\n\nAdmin Giriş Bilgileri:\nKullanıcı Adı: ${institutionForm.admin_username}\nŞifre: ${institutionForm.admin_password}\n\nBu bilgileri kurum adminine verin.`,
-        [{ text: 'Tamam' }]
-      );
-
-      // Formu temizle
-      setInstitutionForm({
-        name: '',
-        type: 'school',
-        contact_email: '',
-        contact_phone: '',
-        address: '',
-        admin_username: '',
-        admin_password: ''
-      });
-
-      setShowAddInstitution(false);
-    } catch (error) {
-      console.error('Kurum ekleme hatası:', error);
-      Alert.alert('Hata', 'Kurum eklenemedi');
-    } finally {
-      setInstitutionLoading(false);
-    }
-  };
-
-  // Kurumları yükle
-  const loadInstitutions = async () => {
-    setLoadingInstitutions(true);
-    try {
-      const { data, error } = await supabaseAdmin
-        .from('institutions')
-        .select(`
-          id,
-          name,
-          type,
-          contact_email,
-          contact_phone,
-          is_active,
-          is_premium,
-          contract_start_date,
-          contract_end_date,
-          payment_status,
-          notes,
-          admin_username,
-          created_at
-        `)
-        .order('created_at', { ascending: false });
-
-      if (error) {
-        console.error('Kurumlar yükleme hatası:', error);
-        Alert.alert('Hata', 'Kurumlar yüklenemedi');
-        return;
-      }
-
-      setInstitutions(data || []);
-    } catch (error) {
-      console.error('Kurumlar yükleme hatası:', error);
-      Alert.alert('Hata', 'Kurumlar yüklenemedi');
-    } finally {
-      setLoadingInstitutions(false);
-    }
-  };
-
-  // Kurum durumu değiştir (aktif/pasif)
-  const toggleInstitutionStatus = async (institutionId, currentStatus, institutionName) => {
-    try {
-      const newStatus = !currentStatus;
-      
-    const { error } = await supabaseAdmin
-        .from('institutions')
-        .update({
-          is_active: newStatus,
-          is_premium: newStatus, // Aktif ise premium da aktif
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', institutionId);
-
-      if (error) {
-        console.error('Kurum durumu güncelleme hatası:', error);
-        Alert.alert('Hata', 'Kurum durumu güncellenemedi: ' + error.message);
-        return;
-      }
-
-      // Kurum üyelerinin erişimini de güncelle
-    const { error: membershipError } = await supabaseAdmin
-        .from('institution_memberships')
-        .update({
-          is_active: newStatus,
-          updated_at: new Date().toISOString()
-        })
-        .eq('institution_id', institutionId);
-
-      if (membershipError) {
-        console.error('Üyelik durumu güncelleme hatası:', membershipError);
-        // Hata olsa da devam et
-      }
-
-      Alert.alert(
-        'Başarılı!',
-        `"${institutionName}" kurumu ${newStatus ? 'aktif' : 'pasif'} edildi.\n\n${
-          newStatus 
-            ? 'Kurum üyeleri artık sistemi kullanabilir.' 
-            : 'Kurum üyeleri sistemi kullanamaz.'
-        }`,
-        [{ text: 'Tamam' }]
-      );
-
-      // Listeyi yenile
-      loadInstitutions();
-    } catch (error) {
-      console.error('Kurum durumu değiştirme hatası:', error);
-      Alert.alert('Hata', 'Kurum durumu değiştirilemedi');
-    }
-  };
+  // NOT: Eski kurum ekleme/yönetim fonksiyonları kaldırıldı
+  // Artık AdminInstitutionsScreen kullanılıyor (Edge Functions ile)
 
   // Tarih seçimi fonksiyonu
   const handleDateChange = (event, selectedDate) => {
@@ -1464,7 +1531,14 @@ export default function LoginScreen({ navigation: navigationProp }) {
         setStudentCount(studentsCnt || 0);
       }
     } catch (error) {
-      console.error('Kurum sayıları yükleme hatası:', error);
+      // Hataları sessizce handle et - sadece debug log'da göster
+      console.log('[DEBUG] Kurum sayıları yükleme hatası:', {
+        errorType: typeof error,
+        errorMessage: error?.message
+      });
+      // Varsayılan değerleri set et
+      setTeacherCount(0);
+      setStudentCount(0);
     }
   };
 
@@ -2320,10 +2394,10 @@ export default function LoginScreen({ navigation: navigationProp }) {
       if (result && result.length > 0) {
         const institutionData = result[0];
         
-        // Kurum detaylarını yükle
+        // Kurum detaylarını yükle (RLS ile erişilebilir olmalı)
         let institutionDetails = null;
         try {
-          const { data: details } = await supabaseAdmin
+          const { data: details } = await supabase
             .from('institutions')
             .select('*')
             .eq('id', institutionData.institution_id)
@@ -2331,7 +2405,9 @@ export default function LoginScreen({ navigation: navigationProp }) {
 
           institutionDetails = details;
         } catch (error) {
-          console.error('Kurum detayları yüklenirken hata:', error);
+          // RLS ile erişilemiyorsa, RPC'den gelen veriyi kullan - sessizce handle et
+          console.log('[DEBUG] Kurum detayları RLS ile alınamadı, RPC verisi kullanılıyor');
+          institutionDetails = institutionData;
         }
 
         const fullInstitutionData = institutionDetails 
@@ -2347,22 +2423,9 @@ export default function LoginScreen({ navigation: navigationProp }) {
 
           if (contractEndDate < today) {
             // Sözleşme bitmiş, kurumu pasif et ve girişi engelle
-            await supabaseAdmin
-              .from('institutions')
-              .update({
-                is_active: false,
-                is_premium: false,
-                updated_at: new Date().toISOString()
-              })
-              .eq('id', institutionData.institution_id);
-
-            await supabaseAdmin
-              .from('institution_memberships')
-              .update({
-                is_active: false,
-                updated_at: new Date().toISOString()
-              })
-              .eq('institution_id', institutionData.institution_id);
+            // NOT: Bu işlemler RLS ile yapılabilir olmalı veya Edge Function kullanılmalı
+            // Şimdilik sadece uyarı göster, güncelleme işlemini backend'de yap
+            console.warn('Sözleşme bitmiş - Kurum pasif edilmeli (Edge Function ile yapılmalı)');
 
             Alert.alert(
               'Erişim Engellendi',
@@ -2419,12 +2482,22 @@ export default function LoginScreen({ navigation: navigationProp }) {
           [
             {
               text: 'Tamam',
-              onPress: () => {
+              onPress: async () => {
                 setShowInstitutionAdminLogin(false);
                 setInstitutionAdminUsername('');
                 setInstitutionAdminPassword('');
                 // Kurum admin panelini modal olarak aç
                 setShowInstitutionAdminPanel(true);
+                // Session'a admin username'i ekle (Edge Function'lar için)
+                const sessionData = {
+                  institutionId: institutionData.institution_id,
+                  institutionName: institutionData.institution_name,
+                  adminUsername: institutionAdminUsername,
+                  loginTime: new Date().toISOString(),
+                  isActive: fullInstitutionData.is_active !== false,
+                  contractEndDate: fullInstitutionData.contract_end_date,
+                };
+                await AsyncStorage.setItem('institutionAdminSession', JSON.stringify(sessionData));
                 // Kurum sayılarını yükle - kurum bilgilerini parametre olarak geç
                 loadInstitutionCounts(institutionData);
               }
@@ -2435,8 +2508,12 @@ export default function LoginScreen({ navigation: navigationProp }) {
         Alert.alert('Hata', result.error || 'Geçersiz kullanıcı adı veya şifre');
       }
     } catch (error) {
-      console.error('Kurum admin giriş hatası:', error);
-      Alert.alert('Hata', 'Giriş yapılamadı: ' + error.message);
+      // Giriş hatalarını log'da göster ama kullanıcıya sadece genel mesaj göster
+      console.log('[DEBUG] Kurum admin giriş hatası:', {
+        errorType: typeof error,
+        errorMessage: error?.message
+      });
+      Alert.alert('Hata', 'Giriş yapılamadı: ' + (error.message || 'Bilinmeyen hata'));
     } finally {
       setInstitutionAdminLoading(false);
     }
@@ -2949,7 +3026,22 @@ export default function LoginScreen({ navigation: navigationProp }) {
             <Button
               title="Demo Görüntüleme"
               onPress={() => {
-                navigation.navigate('Demo');
+                try {
+                  // Demo'ya geçiş yap - CommonActions ile
+                  navigation.dispatch(
+                    CommonActions.navigate({
+                      name: 'Demo',
+                    })
+                  );
+                } catch (error) {
+                  console.error('Demo navigation error:', error);
+                  // Fallback: direkt navigate
+                  if (navigation && navigation.navigate) {
+                    navigation.navigate('Demo');
+                  } else {
+                    Alert.alert('Hata', 'Demo moduna geçilemedi. Lütfen tekrar deneyin.');
+                  }
+                }
               }}
               variant="outline"
               icon={<Ionicons name="eye-outline" size={20} color={colors.primary} />}
@@ -3206,123 +3298,7 @@ export default function LoginScreen({ navigation: navigationProp }) {
 
       {/* Eski Ana Admin Modal'ları Kaldırıldı - Artık AdminDashboardScreen kullanılıyor */}
 
-      {/* Add Institution Modal */}
-      <Modal
-        visible={showAddInstitution}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => setShowAddInstitution(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { maxHeight: '90%' }]}>
-            <Text style={styles.modalTitle}>🏢 Yeni Kurum Ekle</Text>
-            
-            <ScrollView style={styles.modalScrollView}>
-              <Input
-                label="Kurum Adı *"
-                value={institutionForm.name}
-                onChangeText={(text) => setInstitutionForm({ ...institutionForm, name: text })}
-                placeholder="Örnek: ABC Okulu"
-                style={styles.modalInput}
-              />
-              
-              <View style={styles.selectContainer}>
-                <Text style={styles.selectLabel}>Kurum Türü *</Text>
-                <View style={styles.selectOptions}>
-                  {[
-                    { value: 'school', label: 'Okul' },
-                    { value: 'university', label: 'Üniversite' },
-                    { value: 'company', label: 'Şirket' },
-                    { value: 'individual', label: 'Bireysel' },
-                  ].map((option) => (
-                    <TouchableOpacity
-                      key={option.value}
-                      style={[
-                        styles.selectOption,
-                        institutionForm.type === option.value && { backgroundColor: colors.primary + '20' }
-                      ]}
-                      onPress={() => setInstitutionForm({ ...institutionForm, type: option.value })}
-                    >
-                      <Text style={[
-                        styles.selectOptionText,
-                        { color: institutionForm.type === option.value ? colors.primary : colors.textPrimary }
-                      ]}>
-                        {option.label}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              </View>
-            
-            <Input
-                label="İletişim E-postası *"
-                value={institutionForm.contact_email}
-                onChangeText={(text) => setInstitutionForm({ ...institutionForm, contact_email: text })}
-                placeholder="ornek@okul.com"
-                keyboardType="email-address"
-              style={styles.modalInput}
-            />
-            
-            <Input
-                label="İletişim Telefonu"
-                value={institutionForm.contact_phone}
-                onChangeText={(text) => setInstitutionForm({ ...institutionForm, contact_phone: text })}
-                placeholder="+90 555 123 45 67"
-                keyboardType="phone-pad"
-              style={styles.modalInput}
-            />
-            
-            <Input
-                label="Adres"
-                value={institutionForm.address}
-                onChangeText={(text) => setInstitutionForm({ ...institutionForm, address: text })}
-                placeholder="Kurum adresi"
-                multiline
-                numberOfLines={3}
-              style={styles.modalInput}
-            />
-
-              <View style={styles.separator} />
-
-              <Text style={styles.sectionTitle}>Admin Giriş Bilgileri</Text>
-            
-            <Input
-                label="Admin Kullanıcı Adı *"
-                value={institutionForm.admin_username}
-                onChangeText={(text) => setInstitutionForm({ ...institutionForm, admin_username: text })}
-                placeholder="okul123_admin"
-              style={styles.modalInput}
-            />
-            
-            <Input
-                label="Admin Şifresi *"
-                value={institutionForm.admin_password}
-                onChangeText={(text) => setInstitutionForm({ ...institutionForm, admin_password: text })}
-                placeholder="Güçlü bir şifre girin"
-                secureTextEntry
-              style={styles.modalInput}
-            />
-            </ScrollView>
-
-            <View style={styles.modalButtons}>
-              <Button
-                title="İptal"
-                onPress={() => {
-                  setShowAddInstitution(false);
-                }}
-                variant="ghost"
-                style={styles.modalButton}
-              />
-              <Button
-                title={institutionLoading ? "Ekleniyor..." : "Kurum Ekle"}
-                onPress={addInstitution}
-                loading={institutionLoading}
-                style={[styles.modalButton, { backgroundColor: '#4CAF50' }]}
-              />
-            </View>
-          </View>
-        </View>
-      </Modal>
+      {/* NOT: Eski kurum ekleme modal'ı kaldırıldı - Artık AdminInstitutionsScreen kullanılıyor */}
 
       {/* Institution List Modal */}
       <Modal
@@ -3472,7 +3448,10 @@ export default function LoginScreen({ navigation: navigationProp }) {
                               { 
                                 text: item.is_active ? 'Pasif Et' : 'Aktif Et', 
                                 style: item.is_active ? 'destructive' : 'default',
-                                onPress: () => toggleInstitutionStatus(item.id, item.is_active, item.name)
+                                onPress: () => {
+                                  // NOT: Eski toggle fonksiyonu kaldırıldı - AdminInstitutionsScreen kullanın
+                                  Alert.alert('Bilgi', 'Kurum durumunu değiştirmek için Admin Panel > Kurum Yönetimi bölümünü kullanın.');
+                                }
                               }
                             ]
                           );

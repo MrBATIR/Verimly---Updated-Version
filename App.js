@@ -172,9 +172,13 @@ function AppContent() {
                 />
                 <Stack.Screen 
                   name="Demo" 
-                  component={BottomTabNavigator}
-                  initialParams={{ isDemo: true }}
-                />
+                  options={{
+                    headerShown: false,
+                    gestureEnabled: true,
+                  }}
+                >
+                  {(props) => <BottomTabNavigator {...props} isDemo={true} />}
+                </Stack.Screen>
               </>
             )}
           </Stack.Navigator>
